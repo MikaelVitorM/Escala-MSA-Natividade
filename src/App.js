@@ -1,5 +1,5 @@
-import { useState, useCallback, useRef } from "react";
-import * as XLSX from "xlsx";
+import { useState, useRef, useEffect } from "react";
+import * as XLSX from "xlsx"
 
 // ── dados ─────────────────────────────────────────────────────────────────────
 const NOMES_INICIAIS = [
