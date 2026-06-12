@@ -192,20 +192,34 @@ function TelaMembro({ onVoltar }) {
   const dispMembro = (diaId) => membroObj && (disps[diaId] || []).includes(membroObj.id);
   const total = dias.filter(d => dispMembro(d.id)).length;
 
-  const toggleDisp = async (diaId) => {
+const toggleDisp = async (diaId) => {
   if (!membroObj) return;
   const marcado = dispMembro(diaId);
   setDisps(prev => { const a = prev[diaId] || []; return { ...prev, [diaId]: marcado ? a.filter(x => x !== membroObj.id) : [...a, membroObj.id] }; });
   try {
     if (marcado) {
-      await dbDelete("disponibilidades", `membro_id=eq.${membroObj.id}&dia_id=eq.${diaId}`);
+      await fetch(`${SUPABASE_URL}/rest/v1/disponibilidades?membro_id=eq.${membroObj.id}&dia_id=eq.${diaId}`, {
+        method: "DELETE",
+        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
+      });
     } else {
-      await sb("disponibilidades", {
+      await fetch(`${SUPABASE_URL}/rest/v1/disponibilidades`, {
         method: "POST",
-        headers: { Prefer: "resolution=merge-duplicates" },
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": `Bearer ${SUPABASE_KEY}`,
+          "Content-Type": "application/json",
+          "Prefer": "resolution=merge-duplicates"
+        },
         body: JSON.stringify([{ membro_id: membroObj.id, dia_id: diaId, disponivel: true }])
       });
     }
+  } catch (e) {
+    console.error("Erro:", e);
+    alert("Erro ao salvar: " + e.message);
+  }
+};
+
   } catch (e) {
     console.error("Erro ao salvar disponibilidade:", e);
     alert("Erro ao salvar: " + e.message);
