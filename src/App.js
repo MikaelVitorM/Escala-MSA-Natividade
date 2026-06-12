@@ -192,14 +192,24 @@ function TelaMembro({ onVoltar }) {
   const total = dias.filter(d => dispMembro(d.id)).length;
 
   const toggleDisp = async (diaId) => {
-    if (!membroObj) return;
-    const marcado = dispMembro(diaId);
-    setDisps(prev => { const a = prev[diaId] || []; return { ...prev, [diaId]: marcado ? a.filter(x => x !== membroObj.id) : [...a, membroObj.id] }; });
-    try {
-      if (marcado) await dbDelete("disponibilidades", `membro_id=eq.${membroObj.id}&dia_id=eq.${diaId}`);
-      else await dbUpsert("disponibilidades", [{ membro_id: membroObj.id, dia_id: diaId, disponivel: true }]);
-    } catch (e) { console.error(e); }
-  };
+  if (!membroObj) return;
+  const marcado = dispMembro(diaId);
+  setDisps(prev => { const a = prev[diaId] || []; return { ...prev, [diaId]: marcado ? a.filter(x => x !== membroObj.id) : [...a, membroObj.id] }; });
+  try {
+    if (marcado) {
+      await dbDelete("disponibilidades", `membro_id=eq.${membroObj.id}&dia_id=eq.${diaId}`);
+    } else {
+      await sb("disponibilidades", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates" },
+        body: JSON.stringify([{ membro_id: membroObj.id, dia_id: diaId, disponivel: true }])
+      });
+    }
+  } catch (e) {
+    console.error("Erro ao salvar disponibilidade:", e);
+    alert("Erro ao salvar: " + e.message);
+  }
+};
 
   const confirmar = async () => { setSalvando(true); await new Promise(r => setTimeout(r, 500)); setSalvando(false); setConfirmado(true); };
   const filtrados = [...membros].sort((a, b) => a.nome.localeCompare(b.nome)).filter(m => m.nome.toLowerCase().includes(busca.toLowerCase()));
@@ -345,9 +355,11 @@ export default function App() {
           .map(col => FUNCOES_BASE.find(f => f.toLowerCase() === col.toLowerCase()) || col).filter(f => FUNCOES_BASE.includes(f));
         novos.push({ nome, funcoes, score });
       });
-      await dbDelete("membros", "id=neq.00000000-0000-0000-0000-000000000000");
-      const inseridos = await dbInsert("membros", novos.map(m => ({ nome: m.nome, funcoes: m.funcoes, score: m.score })));
-      setMembros(inseridos);
+     try { await dbDelete("membros", "id=neq.00000000-0000-0000-0000-000000000000"); } catch(e) { console.log("delete:", e); }
+await new Promise(r => setTimeout(r, 500));
+const inseridos = await dbInsert("membros", novos.map(m => ({ nome: m.nome, funcoes: m.funcoes, score: m.score })));
+setMembros(Array.isArray(inseridos) ? inseridos : []);
+await carregarDados(true);
       setXlsxStatus("ok"); setXlsxMsg(`${inseridos.length} membro(s) importado(s).`);
     } catch (e) { setXlsxStatus("erro"); setXlsxMsg("Erro: " + e.message); }
     e.target.value = "";
