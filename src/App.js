@@ -134,7 +134,8 @@ function sortearEscala(dias, membros, disponibilidades, historico, manualSlots =
       if (faltam <= 0) continue;
 
       // candidatos com a função e não usados hoje
-      let cands = dispFiltrados.filter(m => (m.funcoes||[]).includes(fn) && !usados.has(m.nome));
+      const norm = s => s.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase();
+let cands = dispFiltrados.filter(m => (m.funcoes||[]).some(f => norm(f)===norm(fn)) && !usados.has(m.nome));
 
       // missa com bispo: excluir quem já serviu em outra missa com bispo
       if (ehBispo) cands = cands.filter(m => !bispoHist.has(m.nome));
