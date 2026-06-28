@@ -4,8 +4,6 @@ import * as XLSX from "xlsx";
 const SUPABASE_URL = "https://sdhxphydfowlftoiwjwt.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNkaHhwaHlkZm93bGZ0b2l3and0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEyMTA1MjAsImV4cCI6MjA5Njc4NjUyMH0._CFXjTwjx9I42MeRxIX7AJP5v3Qp5Cf1mdCSu1urC-0";
 
-const BRASAO = "https://i.imgur.com/placeholder.png"; // substituir pelo URL real do brasão
-
 async function sbFetch(path, opts = {}) {
   const { headers: extra = {}, ...rest } = opts;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -23,9 +21,9 @@ async function sbFetch(path, opts = {}) {
   return txt ? JSON.parse(txt) : [];
 }
 
-const dbGet    = (t, qs = "")  => sbFetch(`${t}?${qs}`);
-const dbInsert = (t, body)     => sbFetch(t, { method: "POST", body: JSON.stringify(body) });
-const dbDelete = (t, qs)       => sbFetch(`${t}?${qs}`, { method: "DELETE" });
+const dbGet    = (t, qs = "") => sbFetch(`${t}?${qs}`);
+const dbInsert = (t, body)    => sbFetch(t, { method: "POST", body: JSON.stringify(body) });
+const dbDelete = (t, qs)      => sbFetch(`${t}?${qs}`, { method: "DELETE" });
 
 async function dbUpsertDisp(membro_id, dia_id) {
   await fetch(`${SUPABASE_URL}/rest/v1/disponibilidades`, {
@@ -48,10 +46,22 @@ const IGREJAS = [
 ];
 const IGREJAS_RESTRITAS = { "Paroquia Natividade - Capela do Santíssimo": ["Librifero","Credencial"] };
 const HORARIOS_FIXOS = ["7h","8h","9h","18h","19h","19h30","20h"];
-const FUNCOES_BASE = ["Cerimoniário Principal","Cerimoniário Regente","Librifero","Microfone","Credencial","Ceroferário","Turiferário","Naveteiro","Baculífero","Mitrífero"];
-const HIERARQUIA_SCORE = ["Credencial","Ceroferário","Microfone","Librifero","Turiferário","Naveteiro","Baculífero","Mitrífero","Cerimoniário Regente","Cerimoniário Principal"];
-const FUNCOES_SEM_REPETICAO = ["Turiferário","Credencial"];
 
+// nomes exatamente como estão no banco
+const FUNCOES_BASE = [
+  "Cerimoniário Principal","Cerimoniário Regente",
+  "Librifero","Microfone","Credencial",
+  "Ceroferário","Turiferário","Naveteiro",
+  "Baculífero","Mitrífero"
+];
+const FUNCOES_SEM_REPETICAO = ["Turiferário","Credencial"];
+const HIERARQUIA_SCORE = [
+  "Credencial","Ceroferário","Microfone","Librifero",
+  "Turiferário","Naveteiro","Baculífero","Mitrífero",
+  "Cerimoniário Regente","Cerimoniário Principal"
+];
+
+const norm = s => s ? s.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim() : "";
 const isDomingo = d => d ? new Date(d+"T12:00:00").getDay()===0 : false;
 const fmtData   = d => d ? new Date(d+"T12:00:00").toLocaleDateString("pt-BR",{weekday:"long",day:"2-digit",month:"long"}) : "";
 
@@ -61,136 +71,118 @@ const C = {
 };
 const bgApp = { minHeight:"100vh", background:"linear-gradient(160deg,#6B0000 0%,#8B0000 40%,#5A0000 100%)", fontFamily:"Georgia,serif", color:C.brancoOff };
 
-// ── funções necessárias ───────────────────────────────────────────────────────
+// ── funções necessárias por dia ───────────────────────────────────────────────
 function getFuncoesNecessarias(dia) {
   if (IGREJAS_RESTRITAS[dia.igreja]) return [{nome:"Librifero",qtd:1},{nome:"Credencial",qtd:1}];
-  const dom = isDomingo(dia.data);
-  const bispo = dia.tem_bispo || dia.temBispo;
-  const incenso = dia.tem_incenso || dia.temIncenso;
-  // ordem de prioridade conforme regras
-  const funcs = [
+  const dom    = isDomingo(dia.data);
+  const bispo  = dia.tem_bispo || dia.temBispo;
+  const incenso= dia.tem_incenso || dia.temIncenso;
+  const funcs  = [
     {nome:"Cerimoniário Principal",qtd:1},
     {nome:"Cerimoniário Regente",  qtd:1},
-    {nome:"Librifero",  qtd:1},
-    {nome:"Microfone",  qtd:1},
-    {nome:"Ceroferário",qtd:2},
-    {nome:"Credencial", qtd:dom?3:2},
+    {nome:"Librifero",   qtd:1},
+    {nome:"Microfone",   qtd:1},
+    {nome:"Ceroferário", qtd:2},
+    {nome:"Credencial",  qtd:dom?3:2},
   ];
-  if (incenso || dom) {
-    funcs.find(f=>f.nome==="Ceroferário").qtd = 6;
+  if (incenso||dom) {
+    funcs.find(f=>f.nome==="Ceroferário").qtd=6;
     if (incenso) funcs.push({nome:"Turiferário",qtd:1},{nome:"Naveteiro",qtd:1});
-    if (dom && !incenso) funcs.find(f=>f.nome==="Credencial").qtd = 3;
+    if (dom&&!incenso) funcs.find(f=>f.nome==="Credencial").qtd=3;
   }
   if (bispo) funcs.push({nome:"Baculífero",qtd:1},{nome:"Mitrífero",qtd:1});
   return funcs;
 }
 
-// ── algoritmo principal ───────────────────────────────────────────────────────
-function sortearEscala(dias, membros, disponibilidades, historico, manualSlots = {}) {
-  // histórico: escalações e funções anteriores
-  const escHist = {}, fnHist = {}, bispoHist = new Set();
-  membros.forEach(m => { escHist[m.nome]=0; fnHist[m.nome]={}; });
-  historico.forEach(h => (h.resultado||[]).forEach(d => {
-    const eraBispo = d.tem_bispo || d.temBispo;
-    Object.entries(d.alocados||{}).forEach(([nome,fn]) => {
-      escHist[nome] = (escHist[nome]||0)+1;
-      fnHist[nome] = fnHist[nome]||{};
-      fnHist[nome][fn] = (fnHist[nome][fn]||0)+1;
-      if (eraBispo) bispoHist.add(nome);
+// ── algoritmo de sorteio ──────────────────────────────────────────────────────
+function sortearEscala(dias, membros, disponibilidades, historico, manualSlots={}) {
+  const escHist={}, fnHist={}, bispoHist=new Set();
+  membros.forEach(m=>{ escHist[m.nome]=0; fnHist[m.nome]={}; });
+  historico.forEach(h=>(h.resultado||[]).forEach(d=>{
+    const eraBispo=d.tem_bispo||d.temBispo;
+    Object.entries(d.alocados||{}).forEach(([nome,fn])=>{
+      escHist[nome]=(escHist[nome]||0)+1;
+      fnHist[nome]=fnHist[nome]||{};
+      fnHist[nome][fn]=(fnHist[nome][fn]||0)+1;
+      if(eraBispo) bispoHist.add(nome);
     });
   }));
 
-  // escalações nesta rodada
-  const escAtual = {};
-  membros.forEach(m => { escAtual[m.nome]=0; });
-  const escaladosDomingo = {}; // data -> Set de nomes
-
-  const resultado = [], observacoes = [];
+  const escAtual={};
+  membros.forEach(m=>{ escAtual[m.nome]=0; });
+  const escaladosDomingo={};
+  const resultado=[], observacoes=[];
 
   for (const dia of dias) {
-    const funcs = getFuncoesNecessarias(dia);
-    const dispDia = disponibilidades[dia.id]||[];
-    const disponiveis = membros.filter(m => dispDia.includes(m.nome));
-    const domData = dia.data;
-    const ehDomingo = isDomingo(domData);
-    const ehBispo = dia.tem_bispo||dia.temBispo;
-    const ehSolenidade = dia.solenidade;
+    const funcs=getFuncoesNecessarias(dia);
+    const dispDia=disponibilidades[dia.id]||[];
+    const disponiveis=membros.filter(m=>dispDia.includes(m.nome));
+    const ehDomingo=isDomingo(dia.data);
+    const ehBispo=dia.tem_bispo||dia.temBispo;
 
-    if (ehDomingo) escaladosDomingo[domData] = escaladosDomingo[domData]||new Set();
+    if(ehDomingo) escaladosDomingo[dia.data]=escaladosDomingo[dia.data]||new Set();
 
-    // filtrar: domingos não podem repetir no mesmo dia
-    const dispFiltrados = ehDomingo
-      ? disponiveis.filter(m => !escaladosDomingo[domData].has(m.nome))
-      : disponiveis;
-
-    // slots manuais deste dia
-    const manual = manualSlots[dia.id]||{};
-    const alocados = {...manual};
-    const usados = new Set(Object.keys(manual));
+    const manual=manualSlots[dia.id]||{};
+    const alocados={...manual};
+    const usados=new Set(Object.keys(manual));
 
     for (const {nome:fn, qtd} of funcs) {
-      const jaAlocados = Object.entries(alocados).filter(([,f])=>f===fn).length;
-      const faltam = qtd - jaAlocados;
-      if (faltam <= 0) continue;
+      const jaAlocados=Object.entries(alocados).filter(([,f])=>f===fn).length;
+      const faltam=qtd-jaAlocados;
+      if(faltam<=0) continue;
 
-      // candidatos com a função e não usados hoje
-      const norm = s => s.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase();
-let cands = dispFiltrados.filter(m => (m.funcoes||[]).some(f => norm(f)===norm(fn)) && !usados.has(m.nome));
+      // candidatos: têm a função, não usados ainda hoje
+      const temFuncao=m=>(m.funcoes||[]).some(f=>norm(f)===norm(fn));
+
+      // primeiro tenta sem repetição de domingo
+      let cands=disponiveis.filter(m=>temFuncao(m)&&!usados.has(m.nome)&&(!ehDomingo||!escaladosDomingo[dia.data].has(m.nome)));
 
       // missa com bispo: excluir quem já serviu em outra missa com bispo
-      if (ehBispo) cands = cands.filter(m => !bispoHist.has(m.nome));
+      if(ehBispo) cands=cands.filter(m=>!bispoHist.has(m.nome));
 
       // funções sem repetição: excluir quem fez na última escala
-      if (FUNCOES_SEM_REPETICAO.includes(fn) && historico.length>0) {
-        const ult = historico[historico.length-1];
-        const fizeraUlt = new Set();
-        (ult.resultado||[]).forEach(d => Object.entries(d.alocados||{}).forEach(([nome,f])=>{ if(f===fn) fizeraUlt.add(nome); }));
-        const sr = cands.filter(m=>!fizeraUlt.has(m.nome));
-        if (sr.length>0) cands = sr;
-        else observacoes.push({motivo:`Repetição inevitável de ${fn} — sem outros candidatos.`});
+      if(FUNCOES_SEM_REPETICAO.some(f=>norm(f)===norm(fn))&&historico.length>0){
+        const ult=historico[historico.length-1];
+        const fizeraUlt=new Set();
+        (ult.resultado||[]).forEach(d=>Object.entries(d.alocados||{}).forEach(([nome,f])=>{ if(norm(f)===norm(fn)) fizeraUlt.add(nome); }));
+        const sr=cands.filter(m=>!fizeraUlt.has(m.nome));
+        if(sr.length>0) cands=sr;
+        else observacoes.push({motivo:`Repetição inevitável de ${fn}.`});
       }
 
-      // REGRA PRINCIPAL: escalar quem foi MENOS escalado primeiro
-      // dentro do mesmo nível de escalação, usar score como desempate
-      // e rotação de função (quem fez menos vezes essa função tem prioridade)
-      cands.sort((a,b) => {
-        const escA = (escHist[a.nome]||0) + (escAtual[a.nome]||0)*3;
-        const escB = (escHist[b.nome]||0) + (escAtual[b.nome]||0)*3;
-        if (escA !== escB) return escA - escB; // menos escalado primeiro
-        // desempate: rotação de função
-        const fnA = (fnHist[a.nome]||{})[fn]||0;
-        const fnB = (fnHist[b.nome]||{})[fn]||0;
-        if (fnA !== fnB) return fnA - fnB;
-        // desempate final: score (maior score = preferência em funções mais altas)
-        const hierA = HIERARQUIA_SCORE.indexOf(fn);
-        if (hierA >= 5) return (b.score||0)-(a.score||0); // funções altas: maior score
-        return (a.score||0)-(b.score||0); // funções baixas: menor score (reservar os bons para funções altas)
+      // ordenação: menos escalado primeiro, desempate por score e rotação de função
+      const ordenar=arr=>arr.sort((a,b)=>{
+        const escA=(escHist[a.nome]||0)+(escAtual[a.nome]||0)*3;
+        const escB=(escHist[b.nome]||0)+(escAtual[b.nome]||0)*3;
+        if(escA!==escB) return escA-escB;
+        const fnA=(fnHist[a.nome]||{})[fn]||0, fnB=(fnHist[b.nome]||{})[fn]||0;
+        if(fnA!==fnB) return fnA-fnB;
+        const hi=HIERARQUIA_SCORE.indexOf(HIERARQUIA_SCORE.find(x=>norm(x)===norm(fn))||fn);
+        return hi>=5?(b.score||0)-(a.score||0):(a.score||0)-(b.score||0);
       });
 
-      for (let i=0; i<faltam; i++) {
-        if (!cands.length) {
-          // tentar pegar de disponiveis sem filtro (ignora filtro de domingo exceto mesma missa)
-          const extras = disponiveis.filter(m=>(m.funcoes||[]).includes(fn)&&!usados.has(m.nome));
-          if (extras.length>0) {
-            extras.sort((a,b)=>{
-              const escA=(escHist[a.nome]||0)+(escAtual[a.nome]||0)*3;
-              const escB=(escHist[b.nome]||0)+(escAtual[b.nome]||0)*3;
-              return escA-escB;
-            });
+      ordenar(cands);
+
+      for(let i=0;i<faltam;i++){
+        if(!cands.length){
+          // sem candidatos sem repetição de domingo — usar quem já serviu se necessário
+          const extras=ordenar(disponiveis.filter(m=>temFuncao(m)&&!usados.has(m.nome)));
+          if(extras.length>0){
             const pick=extras[0];
             alocados[pick.nome]=fn; usados.add(pick.nome);
             escAtual[pick.nome]=(escAtual[pick.nome]||0)+1;
-            if(ehDomingo) escaladosDomingo[domData].add(pick.nome);
-            observacoes.push({motivo:`${pick.nome.split(" ")[0]} repetiu no domingo ${fmtData(domData)} (necessário para preencher ${fn}).`});
+            if(ehDomingo) escaladosDomingo[dia.data].add(pick.nome);
+            if(ehBispo) bispoHist.add(pick.nome);
+            observacoes.push({motivo:`${pick.nome.split(" ")[0]} repetiu no domingo ${fmtData(dia.data)} - ${dia.horario} (necessário para ${fn}).`});
           } else {
-            observacoes.push({motivo:`Sem candidatos para ${fn} em ${fmtData(dia.data)} — vaga em aberto.`});
+            observacoes.push({motivo:`Sem candidatos para ${fn} em ${fmtData(dia.data)} ${dia.horario}.`});
           }
           break;
         }
-        const pick = cands[0];
+        const pick=cands[0];
         alocados[pick.nome]=fn; usados.add(pick.nome);
         escAtual[pick.nome]=(escAtual[pick.nome]||0)+1;
-        if(ehDomingo) escaladosDomingo[domData].add(pick.nome);
+        if(ehDomingo) escaladosDomingo[dia.data].add(pick.nome);
         if(ehBispo) bispoHist.add(pick.nome);
         cands=cands.slice(1);
       }
@@ -198,37 +190,25 @@ let cands = dispFiltrados.filter(m => (m.funcoes||[]).some(f => norm(f)===norm(f
     resultado.push({...dia,funcs,alocados});
   }
 
-  // pendentes: disponíveis mas não escalados — prioridade na próxima
-  const pendentes = membros.filter(m=>{
+  const pendentes=membros.filter(m=>{
     const d=Object.values(disponibilidades).filter(a=>a.includes(m.nome)).length;
     return d>0&&(escAtual[m.nome]||0)===0;
   }).map(m=>({nome:m.nome,score:m.score||0}));
 
-  // desequilíbrios: quem repetiu muito vs pouco
-  const maxEsc = Math.max(...Object.values(escAtual),0);
-  const minEsc = Math.min(...Object.values(escAtual).filter(v=>v>0),maxEsc);
-  if (maxEsc-minEsc>1) {
-    const muitoEscalados = Object.entries(escAtual).filter(([,v])=>v===maxEsc).map(([n])=>n.split(" ")[0]);
-    const poucoEscalados = Object.entries(escAtual).filter(([,v])=>v===minEsc&&v>0).map(([n])=>n.split(" ")[0]);
-    if (muitoEscalados.length && poucoEscalados.length)
-      observacoes.push({motivo:`Atenção: ${muitoEscalados.join(", ")} escalado(s) ${maxEsc}x; ${poucoEscalados.join(", ")} apenas ${minEsc}x. Compensar na próxima escala.`});
+  const maxEsc=Math.max(...Object.values(escAtual),0);
+  const minEsc=Math.min(...Object.values(escAtual).filter(v=>v>0),maxEsc);
+  if(maxEsc-minEsc>1){
+    const muitoEsc=Object.entries(escAtual).filter(([,v])=>v===maxEsc).map(([n])=>n.split(" ")[0]);
+    const poucoEsc=Object.entries(escAtual).filter(([,v])=>v===minEsc&&v>0).map(([n])=>n.split(" ")[0]);
+    if(muitoEsc.length&&poucoEsc.length)
+      observacoes.push({motivo:`Atenção: ${muitoEsc.join(", ")} escalado(s) ${maxEsc}x; ${poucoEsc.join(", ")} apenas ${minEsc}x. Compensar na próxima escala.`});
   }
 
-  return {resultado, observacoes, pendentes, escAtual};
+  return {resultado,observacoes,pendentes,escAtual};
 }
 
-// ── helpers visuais ───────────────────────────────────────────────────────────
-function Tag({label,onRemove,color}) {
-  const c=color||C.ouro;
-  return <span style={{display:"inline-flex",alignItems:"center",gap:4,background:`${c}25`,color:c,border:`1px solid ${c}60`,borderRadius:6,padding:"2px 8px",fontSize:12}}>
-    {label}{onRemove&&<button onClick={onRemove} style={{background:"none",border:"none",cursor:"pointer",color:c,fontSize:14,lineHeight:1,padding:0}}>×</button>}
-  </span>;
-}
-function Card({children,style={}}) { return <div style={{background:"rgba(0,0,0,0.25)",border:`1px solid ${C.ouro}35`,borderRadius:12,padding:18,...style}}>{children}</div>; }
-function SecTitle({children}) { return <div style={{fontSize:11,color:C.ouro,letterSpacing:2,textTransform:"uppercase",marginBottom:12}}>{children}</div>; }
-function Spinner() { return <div style={{textAlign:"center",padding:60,color:C.ouro,fontSize:14}}>⏳ Carregando…</div>; }
-
-function calcPre(dias,membros,disponibilidades) {
+// ── estatísticas ──────────────────────────────────────────────────────────────
+function calcPre(dias,membros,disponibilidades){
   const dispPorMembro={},dispPorDia={};
   membros.forEach(m=>{dispPorMembro[m.nome]=0;});
   dias.forEach(dia=>{
@@ -239,19 +219,30 @@ function calcPre(dias,membros,disponibilidades) {
   const naoPreencheram=membros.filter(m=>!Object.values(disponibilidades).some(a=>a.includes(m.nome))).map(m=>m.nome);
   const vals=Object.values(dispPorDia).sort((a,b)=>b.count-a.count);
   const total=Object.values(dispPorMembro).reduce((s,v)=>s+v,0);
-  return {dispPorMembro,naoPreencheram,maisDia:vals[0],menosDia:vals[vals.length-1],mediaDisp:membros.length>0?(total/membros.length).toFixed(1):0};
+  return{dispPorMembro,naoPreencheram,maisDia:vals[0],menosDia:vals[vals.length-1],mediaDisp:membros.length>0?(total/membros.length).toFixed(1):0};
 }
-function calcPos({resultado,pendentes},membros,disponibilidades) {
+function calcPos({resultado,pendentes},membros,disponibilidades){
   const escaladoPor={},dispPor={};
   membros.forEach(m=>{escaladoPor[m.nome]=0;dispPor[m.nome]=Object.values(disponibilidades).filter(a=>a.includes(m.nome)).length;});
   resultado.forEach(dia=>Object.keys(dia.alocados||{}).forEach(n=>{escaladoPor[n]=(escaladoPor[n]||0)+1;}));
   const total=Object.values(escaladoPor).reduce((s,v)=>s+v,0);
   const count=Object.values(escaladoPor).filter(v=>v>0).length;
-  return {escaladoPor,dispPor,media:count>0?(total/count).toFixed(1):0,pendentes};
+  return{escaladoPor,dispPor,media:count>0?(total/count).toFixed(1):0,pendentes};
 }
 
+// ── componentes base ──────────────────────────────────────────────────────────
+function Tag({label,onRemove,color}){
+  const c=color||C.ouro;
+  return <span style={{display:"inline-flex",alignItems:"center",gap:4,background:`${c}25`,color:c,border:`1px solid ${c}60`,borderRadius:6,padding:"2px 8px",fontSize:12}}>
+    {label}{onRemove&&<button onClick={onRemove} style={{background:"none",border:"none",cursor:"pointer",color:c,fontSize:14,lineHeight:1,padding:0}}>×</button>}
+  </span>;
+}
+function Card({children,style={}}){ return <div style={{background:"rgba(0,0,0,0.25)",border:`1px solid ${C.ouro}35`,borderRadius:12,padding:18,...style}}>{children}</div>; }
+function SecTitle({children}){ return <div style={{fontSize:11,color:C.ouro,letterSpacing:2,textTransform:"uppercase",marginBottom:12}}>{children}</div>; }
+function Spinner(){ return <div style={{textAlign:"center",padding:60,color:C.ouro,fontSize:14}}>⏳ Carregando…</div>; }
+
 // ── TELA DO MEMBRO ────────────────────────────────────────────────────────────
-function TelaMembro({onVoltar}) {
+function TelaMembro({onVoltar}){
   const [membros,setMembros]=useState([]);
   const [dias,setDias]=useState([]);
   const [disps,setDisps]=useState({});
@@ -263,7 +254,7 @@ function TelaMembro({onVoltar}) {
 
   useEffect(()=>{
     (async()=>{
-      try {
+      try{
         const [ms,ds,dps]=await Promise.all([
           dbGet("membros","select=id,nome&order=nome"),
           dbGet("dias_escala","select=*&order=data,horario"),
@@ -271,10 +262,10 @@ function TelaMembro({onVoltar}) {
         ]);
         setMembros(ms); setDias(ds);
         const map={};
-        for (const d of ds) map[d.id]=[];
-        for (const dp of dps) { if(map[dp.dia_id]) map[dp.dia_id].push(dp.membro_id); }
+        for(const d of ds) map[d.id]=[];
+        for(const dp of dps){ if(map[dp.dia_id]) map[dp.dia_id].push(dp.membro_id); }
         setDisps(map);
-      } catch(e){console.error(e);}
+      }catch(e){console.error(e);}
       setLoading(false);
     })();
   },[]);
@@ -287,15 +278,15 @@ function TelaMembro({onVoltar}) {
     if(!membroObj)return;
     const marcado=dispMembro(diaId);
     setDisps(prev=>{const a=prev[diaId]||[];return{...prev,[diaId]:marcado?a.filter(x=>x!==membroObj.id):[...a,membroObj.id]};});
-    try {
-      if(marcado) {
+    try{
+      if(marcado){
         await fetch(`${SUPABASE_URL}/rest/v1/disponibilidades?membro_id=eq.${membroObj.id}&dia_id=eq.${diaId}`,{
           method:"DELETE",headers:{"apikey":SUPABASE_KEY,"Authorization":`Bearer ${SUPABASE_KEY}`}
         });
       } else {
         await dbUpsertDisp(membroObj.id,diaId);
       }
-    } catch(e){console.error(e);alert("Erro ao salvar: "+e.message);}
+    }catch(e){console.error(e);alert("Erro ao salvar: "+e.message);}
   };
 
   const confirmar=async()=>{setSalvando(true);await new Promise(r=>setTimeout(r,400));setSalvando(false);setConfirmado(true);};
@@ -306,7 +297,7 @@ function TelaMembro({onVoltar}) {
   if(!nome) return(
     <div style={{...bgApp,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}>
       <div style={{textAlign:"center",marginBottom:20}}>
-        <div style={{fontSize:30,color:C.ouro,marginBottom:4}}>✦</div>
+        <div style={{fontSize:30,color:C.ouro}}>✦</div>
         <h1 style={{color:C.branco,fontWeight:400,fontSize:20,margin:"4px 0",letterSpacing:3}}>Escala Litúrgica</h1>
         <div style={{fontSize:11,color:C.ouro,letterSpacing:2}}>MSA NATIVIDADE</div>
         <div style={{width:70,height:1,background:`linear-gradient(90deg,transparent,${C.ouro},transparent)`,margin:"8px auto"}}/>
@@ -367,7 +358,7 @@ function TelaMembro({onVoltar}) {
 const VIEWS=["📅 Dias","👥 Membros","🔗 Link","📊 Estatísticas","🎲 Sorteio","📋 Histórico"];
 const isMembro=window.location.search.includes("membro=1");
 
-export default function App() {
+export default function App(){
   if(isMembro) return <TelaMembro/>;
 
   const [view,setView]=useState(0);
@@ -377,8 +368,8 @@ export default function App() {
   const [disponibilidades,setDisponibilidades]=useState({});
   const [historico,setHistorico]=useState([]);
   const [sorteioAtual,setSorteioAtual]=useState(null);
-  const [manualSlots,setManualSlots]=useState({}); // {diaId: {nome: funcao}}
-  const [editandoManual,setEditandoManual]=useState(null); // diaId
+  const [manualSlots,setManualSlots]=useState({});
+  const [editandoManual,setEditandoManual]=useState(null);
   const [buscaSorteio,setBuscaSorteio]=useState("");
   const [formDia,setFormDia]=useState({data:"",horario:"",horarioCustom:"",usarCustom:false,igreja:"",temIncenso:false,temBispo:false,solenidade:false,nomeSolenidade:""});
   const [xlsxStatus,setXlsxStatus]=useState(null);
@@ -388,7 +379,7 @@ export default function App() {
   const [salvando,setSalvando]=useState(false);
 
   const carregarDados=async(completo=false)=>{
-    try {
+    try{
       const promises=[
         dbGet("dias_escala","select=*&order=data,horario"),
         dbGet("membros","select=*&order=nome"),
@@ -402,7 +393,7 @@ export default function App() {
       for(const d of ds) map[d.id]=[];
       for(const dp of dps){const m=ms.find(x=>x.id===dp.membro_id);if(m&&map[dp.dia_id])map[dp.dia_id].push(m.nome);}
       setDisponibilidades(map);
-    } catch(e){console.error(e);}
+    }catch(e){console.error(e);}
     setLoading(false);
   };
 
@@ -448,12 +439,14 @@ export default function App() {
       rows.forEach(row=>{
         const nome=String(row[nomeKey]||"").trim();if(!nome)return;
         const score=scoreKey?parseFloat(String(row[scoreKey]||"0").replace(",","."))||0:0;
-        const funcoes=funcCols.filter(col=>{const v=String(row[col]||"").trim().toLowerCase();return v==="sim"||v==="s"||v==="yes"||v==="x"||v==="1";})
-          .map(col=>FUNCOES_BASE.find(f=>f.toLowerCase()===col.toLowerCase())||col).filter(f=>FUNCOES_BASE.includes(f));
+        const funcoes=funcCols
+          .filter(col=>{const v=String(row[col]||"").trim().toLowerCase();return v==="sim"||v==="s"||v==="yes"||v==="x"||v==="1";})
+          .map(col=>FUNCOES_BASE.find(f=>norm(f)===norm(col))||col)
+          .filter(f=>FUNCOES_BASE.some(fb=>norm(fb)===norm(f)));
         novos.push({nome,funcoes,score});
       });
       try{await dbDelete("membros","id=neq.00000000-0000-0000-0000-000000000000");}catch(e){console.log(e);}
-      await new Promise(r=>setTimeout(r,500));
+      await new Promise(r=>setTimeout(r,600));
       const inseridos=await dbInsert("membros",novos.map(m=>({nome:m.nome,funcoes:m.funcoes,score:m.score})));
       setMembros(Array.isArray(inseridos)?inseridos:[]);
       await carregarDados(true);
@@ -479,41 +472,37 @@ export default function App() {
     if(!sorteioAtual)return;
     setSalvando(true);
     try{
-      const [novo]=await dbInsert("historico_escalas",[{nome:nomeEscala||`Escala ${new Date().toLocaleDateString("pt-BR")}`,resultado:sorteioAtual.resultado,pendentes:sorteioAtual.pendentes?.map(p=>p.nome||p)||[]}]);
+      const [novo]=await dbInsert("historico_escalas",[{nome:nomeEscala||`Escala ${new Date().toLocaleDateString("pt-BR")}`,resultado:sorteioAtual.resultado,pendentes:(sorteioAtual.pendentes||[]).map(p=>p.nome||p)}]);
       setHistorico(p=>[{...novo,resultado:novo.resultado||[]},...p]);
       alert("Escala salva!");
     }catch(e){alert("Erro: "+e.message);}
     setSalvando(false);
   };
 
-  const excluirHistorico=async(id)=>{await dbDelete("historico_escalas",`id=eq.${id}`);setHistorico(p=>p.filter(h=>h.id!==id));};
+  const excluirHistorico=async(id)=>{
+    await dbDelete("historico_escalas",`id=eq.${id}`);
+    setHistorico(p=>p.filter(h=>h.id!==id));
+  };
 
   const linkMembro=`${window.location.origin}${window.location.pathname}?membro=1`;
   const statsPre=calcPre(dias,membros,disponibilidades);
   const statsPos=sorteioAtual?calcPos(sorteioAtual,membros,disponibilidades):null;
 
-  // buscador no sorteio
-  const resultadoFiltrado=sorteioAtual?.resultado?.map(dia=>({
-    ...dia,
-    alocadosFiltrados: buscaSorteio
-      ? Object.fromEntries(Object.entries(dia.alocados||{}).filter(([n])=>n.toLowerCase().includes(buscaSorteio.toLowerCase())))
-      : dia.alocados
-  }));
+  const resultadoFiltrado=sorteioAtual?.resultado?.map(dia=>({...dia}));
 
   if(simMembro) return <TelaMembro onVoltar={()=>setSimMembro(false)}/>;
   if(loading) return <div style={bgApp}><Spinner/></div>;
 
   return(
     <div style={bgApp}>
-      {/* HEADER COM BRASÃO */}
-      <div style={{textAlign:"center",padding:"20px 24px 12px",borderBottom:`1px solid ${C.ouro}40`,background:"rgba(0,0,0,0.25)",display:"flex",alignItems:"center",justifyContent:"center",gap:16,flexWrap:"wrap"}}>
-        <div style={{width:56,height:56,borderRadius:"50%",background:`${C.ouro}20`,border:`2px solid ${C.ouro}50`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:28,flexShrink:0}}>✦</div>
-        <div style={{textAlign:"center"}}>
-          <div style={{fontSize:9,letterSpacing:6,color:C.ouro,textTransform:"uppercase",marginBottom:3}}>Painel do Organizador</div>
-          <h1 style={{margin:0,fontSize:"clamp(16px,4vw,26px)",fontWeight:400,color:C.branco,letterSpacing:3}}>Escala Litúrgica</h1>
-          <div style={{fontSize:10,color:C.ouro,letterSpacing:3}}>MSA NATIVIDADE</div>
-        </div>
-        <div style={{width:56,height:56,borderRadius:"50%",background:`${C.ouro}20`,border:`2px solid ${C.ouro}50`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:28,flexShrink:0}}>✦</div>
+      {/* HEADER */}
+      <div style={{textAlign:"center",padding:"20px 24px 12px",borderBottom:`1px solid ${C.ouro}40`,background:"rgba(0,0,0,0.25)"}}>
+        <div style={{fontSize:9,letterSpacing:6,color:C.ouro,textTransform:"uppercase",marginBottom:3}}>Painel do Organizador</div>
+        <h1 style={{margin:0,fontSize:"clamp(16px,4vw,26px)",fontWeight:400,color:C.branco,letterSpacing:3}}>
+          <span style={{color:C.ouro}}>✦</span> Escala Litúrgica <span style={{color:C.ouro}}>✦</span>
+        </h1>
+        <div style={{fontSize:10,color:C.ouro,letterSpacing:3,marginTop:2}}>MSA NATIVIDADE</div>
+        <div style={{width:80,height:1,background:`linear-gradient(90deg,transparent,${C.ouro},transparent)`,margin:"8px auto 0"}}/>
       </div>
 
       <div style={{display:"flex",justifyContent:"center",flexWrap:"wrap",gap:3,padding:"10px 10px 0"}}>
@@ -615,7 +604,7 @@ export default function App() {
               ?<div style={{textAlign:"center",color:`${C.ouro}50`,padding:36,fontSize:13}}>Nenhum membro importado.</div>
               :<Card>
                 <SecTitle>{membros.length} membro(s) — ordenados por score</SecTitle>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(195px,1fr))",gap:6,maxHeight:400,overflowY:"auto"}}>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(195px,1fr))",gap:6,maxHeight:420,overflowY:"auto"}}>
                   {[...membros].sort((a,b)=>(b.score||0)-(a.score||0)).map(m=>(
                     <div key={m.id} style={{background:"rgba(0,0,0,0.2)",border:`1px solid ${(m.funcoes||[]).length>0?C.ouro+"50":C.ouro+"20"}`,borderRadius:7,padding:"8px 10px"}}>
                       <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
@@ -720,12 +709,12 @@ export default function App() {
                 {statsPos.pendentes?.length>0&&(
                   <div>
                     <div style={{fontSize:11,color:"#88ddff",marginBottom:4}}>🔖 Prioridade próxima escala ({statsPos.pendentes.length})</div>
-                    <div style={{display:"flex",flexWrap:"wrap",gap:3}}>{statsPos.pendentes.map(p=>{const n=p.nome||p;return<Tag key={n} label={n.split(" ").slice(0,2).join(" ")} color="#88ddff"/>;})</div>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(statsPos.pendentes||[]).map(p=>{const n=p.nome||p;return<Tag key={n} label={n.split(" ").slice(0,2).join(" ")} color="#88ddff"/>;})}</div>
                   </div>
                 )}
               </Card>
             )}
-            <div style={{textAlign:"right"}}><button onClick={()=>{gerarSorteio();}} style={btnPri}>🎲 Gerar Sorteio →</button></div>
+            <div style={{textAlign:"right"}}><button onClick={gerarSorteio} style={btnPri}>🎲 Gerar Sorteio →</button></div>
           </div>
         )}
 
@@ -740,22 +729,20 @@ export default function App() {
               </div>
             </div>
 
-            {/* nome da escala e buscador */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
               <div>
                 <label style={lbl}>Nome da escala</label>
                 <input placeholder="Ex: Julho 2025…" value={nomeEscala} onChange={e=>setNomeEscala(e.target.value)} style={inp}/>
               </div>
               <div>
-                <label style={lbl}>🔍 Buscar nome no resultado</label>
+                <label style={lbl}>🔍 Buscar nome</label>
                 <input placeholder="Digite um nome…" value={buscaSorteio} onChange={e=>setBuscaSorteio(e.target.value)} style={inp}/>
               </div>
             </div>
 
-            {/* observações */}
             {sorteioAtual?.observacoes?.length>0&&(
               <Card style={{marginBottom:10,border:`1px solid #ff884450`}}>
-                <SecTitle>⚠️ Observações do sorteio</SecTitle>
+                <SecTitle>⚠️ Observações</SecTitle>
                 {sorteioAtual.observacoes.map((o,i)=><div key={i} style={{color:"#ffaa66",fontSize:12,marginBottom:3}}>• {o.motivo}</div>)}
               </Card>
             )}
@@ -764,7 +751,7 @@ export default function App() {
               <Card style={{marginBottom:10,border:`1px solid #88ddff40`}}>
                 <SecTitle>🔖 Prioridade na próxima escala</SecTitle>
                 <div style={{display:"flex",flexWrap:"wrap",gap:3}}>
-                  {sorteioAtual.pendentes.map(p=>{const n=p.nome||p;return<Tag key={n} label={`${n.split(" ").slice(0,2).join(" ")}${p.score>0?" ★"+p.score:""}`} color="#88ddff"/>;})}</div>
+                  {(sorteioAtual.pendentes||[]).map(p=>{const n=p.nome||p;return<Tag key={n} label={`${n.split(" ").slice(0,2).join(" ")}${p.score>0?" ★"+p.score:""}`} color="#88ddff"/>;})}</div>
               </Card>
             )}
 
@@ -785,17 +772,15 @@ export default function App() {
                         {falta&&<span style={{marginLeft:6,color:"#ffaa66",fontSize:10}}>⚠️ Vagas em aberto</span>}
                       </div>
                     </div>
-                    {/* botão fazer manualmente */}
                     <button onClick={()=>setEditandoManual(editandoManual===dia.id?null:dia.id)} style={{...btnSec,fontSize:11,padding:"4px 10px"}}>
                       {editandoManual===dia.id?"✕ Fechar":"✏️ Manual"}
                     </button>
                   </div>
 
-                  {/* editor manual */}
                   {editandoManual===dia.id&&(
                     <div style={{background:"rgba(0,0,0,0.3)",borderRadius:8,padding:12,marginBottom:10,border:`1px solid ${C.ouro}30`}}>
-                      <div style={{fontSize:11,color:C.ouro,marginBottom:8}}>Selecione manualmente — o sorteio preencherá o restante automaticamente:</div>
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:6}}>
+                      <div style={{fontSize:11,color:C.ouro,marginBottom:8}}>Defina manualmente — o restante será preenchido automaticamente:</div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(210px,1fr))",gap:6}}>
                         {dia.funcs.map(({nome:fn})=>{
                           const atualNome=Object.entries(manualSlots[dia.id]||{}).find(([,f])=>f===fn)?.[0]||"";
                           return(
@@ -805,14 +790,13 @@ export default function App() {
                                 const v=e.target.value;
                                 setManualSlots(prev=>{
                                   const d={...(prev[dia.id]||{})};
-                                  // remover alocação anterior desta função
                                   Object.keys(d).forEach(k=>{if(d[k]===fn)delete d[k];});
                                   if(v) d[v]=fn;
                                   return{...prev,[dia.id]:d};
                                 });
                               }} style={{...inp,fontSize:12,padding:"5px 8px"}}>
                                 <option value="">— Automático —</option>
-                                {(disponibilidades[dia.id]||[]).filter(n=>{const m=membros.find(x=>x.nome===n);return(m?.funcoes||[]).includes(fn);}).map(n=><option key={n}>{n}</option>)}
+                                {(disponibilidades[dia.id]||[]).filter(n=>{const m=membros.find(x=>x.nome===n);return(m?.funcoes||[]).some(f=>norm(f)===norm(fn));}).map(n=><option key={n}>{n}</option>)}
                               </select>
                             </div>
                           );
@@ -825,14 +809,13 @@ export default function App() {
                   <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))",gap:6}}>
                     {dia.funcs.map(({nome:fn,qtd})=>{
                       const pessoas=Object.entries(dia.alocados||{}).filter(([,f])=>f===fn).map(([n])=>n);
-                      const destaque=buscaSorteio?pessoas.filter(p=>p.toLowerCase().includes(buscaSorteio.toLowerCase())):[];
                       const f=qtd-pessoas.length;
                       return(
                         <div key={fn} style={{background:f>0?"rgba(180,40,0,0.2)":`${C.ouro}08`,border:`1px solid ${f>0?"#ff440035":C.ouro+"35"}`,borderRadius:7,padding:"7px 9px"}}>
                           <div style={{fontSize:10,letterSpacing:1,color:C.ouro,marginBottom:3,textTransform:"uppercase"}}>{fn} ({qtd})</div>
                           {pessoas.map(p=>{
                             const mb=membros.find(m=>m.nome===p);
-                            const highlight=destaque.includes(p);
+                            const highlight=buscaSorteio&&p.toLowerCase().includes(buscaSorteio.toLowerCase());
                             return(
                               <div key={p} style={{fontSize:11,color:highlight?"#FFD700":C.ouroPale,marginBottom:1,display:"flex",justifyContent:"space-between",background:highlight?"rgba(255,215,0,0.1)":"transparent",borderRadius:3,padding:"1px 3px"}}>
                                 <span>✓ {p.split(" ").slice(0,2).join(" ")}</span>
