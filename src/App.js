@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 
 const SUPABASE_URL = "https://sdhxphydfowlftoiwjwt.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNkaHhwaHlkZm93bGZ0b2l3and0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEyMTA1MjAsImV4cCI6MjA5Njc4NjUyMH0._CFXjTwjx9I42MeRxIX7AJP5v3Qp5Cf1mdCSu1urC-0";
+const BRASAO = "https://i.imgur.com/ejDFAD0.png";
 
 async function sbFetch(path, opts = {}) {
   const { headers: extra = {}, ...rest } = opts;
@@ -38,7 +39,6 @@ async function dbUpsertDisp(membro_id, dia_id) {
   });
 }
 
-// ── constantes ────────────────────────────────────────────────────────────────
 const IGREJAS = [
   "Paroquia Natividade - Presbitério","Paroquia Natividade - Capela do Santíssimo",
   "Menino Jesus de Praga","Nossa Senhora das Graças","São Sebastião",
@@ -46,8 +46,6 @@ const IGREJAS = [
 ];
 const IGREJAS_RESTRITAS = { "Paroquia Natividade - Capela do Santíssimo": ["Librifero","Credencial"] };
 const HORARIOS_FIXOS = ["7h","8h","9h","18h","19h","19h30","20h"];
-
-// nomes exatamente como estão no banco
 const FUNCOES_BASE = [
   "Cerimoniário Principal","Cerimoniário Regente",
   "Librifero","Microfone","Credencial",
@@ -71,12 +69,11 @@ const C = {
 };
 const bgApp = { minHeight:"100vh", background:"linear-gradient(160deg,#6B0000 0%,#8B0000 40%,#5A0000 100%)", fontFamily:"Georgia,serif", color:C.brancoOff };
 
-// ── funções necessárias por dia ───────────────────────────────────────────────
 function getFuncoesNecessarias(dia) {
   if (IGREJAS_RESTRITAS[dia.igreja]) return [{nome:"Librifero",qtd:1},{nome:"Credencial",qtd:1}];
   const dom    = isDomingo(dia.data);
-  const bispo  = dia.tem_bispo || dia.temBispo;
-  const incenso= dia.tem_incenso || dia.temIncenso;
+  const bispo  = dia.tem_bispo||dia.temBispo;
+  const incenso= dia.tem_incenso||dia.temIncenso;
   const funcs  = [
     {nome:"Cerimoniário Principal",qtd:1},
     {nome:"Cerimoniário Regente",  qtd:1},
@@ -94,7 +91,6 @@ function getFuncoesNecessarias(dia) {
   return funcs;
 }
 
-// ── algoritmo de sorteio ──────────────────────────────────────────────────────
 function sortearEscala(dias, membros, disponibilidades, historico, manualSlots={}) {
   const escHist={}, fnHist={}, bispoHist=new Set();
   membros.forEach(m=>{ escHist[m.nome]=0; fnHist[m.nome]={}; });
@@ -131,16 +127,12 @@ function sortearEscala(dias, membros, disponibilidades, historico, manualSlots={
       const faltam=qtd-jaAlocados;
       if(faltam<=0) continue;
 
-      // candidatos: têm a função, não usados ainda hoje
       const temFuncao=m=>(m.funcoes||[]).some(f=>norm(f)===norm(fn));
 
-      // primeiro tenta sem repetição de domingo
       let cands=disponiveis.filter(m=>temFuncao(m)&&!usados.has(m.nome)&&(!ehDomingo||!escaladosDomingo[dia.data].has(m.nome)));
 
-      // missa com bispo: excluir quem já serviu em outra missa com bispo
       if(ehBispo) cands=cands.filter(m=>!bispoHist.has(m.nome));
 
-      // funções sem repetição: excluir quem fez na última escala
       if(FUNCOES_SEM_REPETICAO.some(f=>norm(f)===norm(fn))&&historico.length>0){
         const ult=historico[historico.length-1];
         const fizeraUlt=new Set();
@@ -150,22 +142,20 @@ function sortearEscala(dias, membros, disponibilidades, historico, manualSlots={
         else observacoes.push({motivo:`Repetição inevitável de ${fn}.`});
       }
 
-      // ordenação: menos escalado primeiro, desempate por score e rotação de função
-      const ordenar=arr=>arr.sort((a,b)=>{
+      const ordenar=arr=>[...arr].sort((a,b)=>{
         const escA=(escHist[a.nome]||0)+(escAtual[a.nome]||0)*3;
         const escB=(escHist[b.nome]||0)+(escAtual[b.nome]||0)*3;
         if(escA!==escB) return escA-escB;
         const fnA=(fnHist[a.nome]||{})[fn]||0, fnB=(fnHist[b.nome]||{})[fn]||0;
         if(fnA!==fnB) return fnA-fnB;
-        const hi=HIERARQUIA_SCORE.indexOf(HIERARQUIA_SCORE.find(x=>norm(x)===norm(fn))||fn);
+        const hi=HIERARQUIA_SCORE.findIndex(x=>norm(x)===norm(fn));
         return hi>=5?(b.score||0)-(a.score||0):(a.score||0)-(b.score||0);
       });
 
-      ordenar(cands);
+      cands=ordenar(cands);
 
       for(let i=0;i<faltam;i++){
         if(!cands.length){
-          // sem candidatos sem repetição de domingo — usar quem já serviu se necessário
           const extras=ordenar(disponiveis.filter(m=>temFuncao(m)&&!usados.has(m.nome)));
           if(extras.length>0){
             const pick=extras[0];
@@ -207,7 +197,6 @@ function sortearEscala(dias, membros, disponibilidades, historico, manualSlots={
   return {resultado,observacoes,pendentes,escAtual};
 }
 
-// ── estatísticas ──────────────────────────────────────────────────────────────
 function calcPre(dias,membros,disponibilidades){
   const dispPorMembro={},dispPorDia={};
   membros.forEach(m=>{dispPorMembro[m.nome]=0;});
@@ -221,6 +210,7 @@ function calcPre(dias,membros,disponibilidades){
   const total=Object.values(dispPorMembro).reduce((s,v)=>s+v,0);
   return{dispPorMembro,naoPreencheram,maisDia:vals[0],menosDia:vals[vals.length-1],mediaDisp:membros.length>0?(total/membros.length).toFixed(1):0};
 }
+
 function calcPos({resultado,pendentes},membros,disponibilidades){
   const escaladoPor={},dispPor={};
   membros.forEach(m=>{escaladoPor[m.nome]=0;dispPor[m.nome]=Object.values(disponibilidades).filter(a=>a.includes(m.nome)).length;});
@@ -230,7 +220,6 @@ function calcPos({resultado,pendentes},membros,disponibilidades){
   return{escaladoPor,dispPor,media:count>0?(total/count).toFixed(1):0,pendentes};
 }
 
-// ── componentes base ──────────────────────────────────────────────────────────
 function Tag({label,onRemove,color}){
   const c=color||C.ouro;
   return <span style={{display:"inline-flex",alignItems:"center",gap:4,background:`${c}25`,color:c,border:`1px solid ${c}60`,borderRadius:6,padding:"2px 8px",fontSize:12}}>
@@ -241,7 +230,6 @@ function Card({children,style={}}){ return <div style={{background:"rgba(0,0,0,0
 function SecTitle({children}){ return <div style={{fontSize:11,color:C.ouro,letterSpacing:2,textTransform:"uppercase",marginBottom:12}}>{children}</div>; }
 function Spinner(){ return <div style={{textAlign:"center",padding:60,color:C.ouro,fontSize:14}}>⏳ Carregando…</div>; }
 
-// ── TELA DO MEMBRO ────────────────────────────────────────────────────────────
 function TelaMembro({onVoltar}){
   const [membros,setMembros]=useState([]);
   const [dias,setDias]=useState([]);
@@ -297,7 +285,7 @@ function TelaMembro({onVoltar}){
   if(!nome) return(
     <div style={{...bgApp,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}>
       <div style={{textAlign:"center",marginBottom:20}}>
-        <div style={{fontSize:30,color:C.ouro}}>✦</div>
+        <img src={BRASAO} alt="Brasão MSA" style={{width:80,height:80,objectFit:"contain",marginBottom:8,filter:"drop-shadow(0 2px 8px rgba(201,168,76,0.4))"}}/>
         <h1 style={{color:C.branco,fontWeight:400,fontSize:20,margin:"4px 0",letterSpacing:3}}>Escala Litúrgica</h1>
         <div style={{fontSize:11,color:C.ouro,letterSpacing:2}}>MSA NATIVIDADE</div>
         <div style={{width:70,height:1,background:`linear-gradient(90deg,transparent,${C.ouro},transparent)`,margin:"8px auto"}}/>
@@ -315,21 +303,25 @@ function TelaMembro({onVoltar}){
 
   if(confirmado) return(
     <div style={{...bgApp,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,textAlign:"center"}}>
-      <div style={{fontSize:50}}>✅</div>
-      <h2 style={{color:C.branco,fontWeight:400,fontSize:19,margin:"10px 0 0"}}>Confirmado!</h2>
-      <p style={{color:C.ouroPale}}><strong style={{color:C.ouroClaro}}>{nome.split(" ")[0]}</strong> — <strong style={{color:C.ouroClaro}}>{total}</strong> dia(s) marcado(s).</p>
-      <button onClick={()=>{setNome("");setBusca("");setConfirmado(false);}} style={{...btnPri,marginTop:14}}>Voltar ao início</button>
+      <img src={BRASAO} alt="Brasão" style={{width:60,height:60,objectFit:"contain",marginBottom:10,opacity:.8}}/>
+      <div style={{fontSize:50,marginBottom:6}}>✅</div>
+      <h2 style={{color:C.branco,fontWeight:400,fontSize:19,margin:"0 0 6px"}}>Confirmado!</h2>
+      <p style={{color:C.ouroPale,margin:0}}><strong style={{color:C.ouroClaro}}>{nome.split(" ")[0]}</strong> — <strong style={{color:C.ouroClaro}}>{total}</strong> dia(s) marcado(s).</p>
+      <button onClick={()=>{setNome("");setBusca("");setConfirmado(false);}} style={{...btnPri,marginTop:16}}>Voltar ao início</button>
     </div>
   );
 
   return(
     <div style={{...bgApp,paddingBottom:48}}>
       <div style={{background:"rgba(0,0,0,0.3)",borderBottom:`1px solid ${C.ouro}40`,padding:"12px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
-        <div><div style={{fontSize:10,color:C.ouro,letterSpacing:3,textTransform:"uppercase"}}>Olá,</div><div style={{color:C.branco,fontSize:15,fontWeight:600}}>{nome}</div></div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <img src={BRASAO} alt="Brasão" style={{width:36,height:36,objectFit:"contain"}}/>
+          <div><div style={{fontSize:10,color:C.ouro,letterSpacing:2,textTransform:"uppercase"}}>Olá,</div><div style={{color:C.branco,fontSize:15,fontWeight:600}}>{nome}</div></div>
+        </div>
         <button onClick={()=>setNome("")} style={btnSec}>Trocar</button>
       </div>
       <div style={{maxWidth:640,margin:"0 auto",padding:"16px 14px"}}>
-        <p style={{color:C.ouroPale,fontSize:13,marginBottom:12}}>Marque os dias disponíveis:</p>
+        <p style={{color:C.ouroPale,fontSize:13,marginBottom:12}}>Marque os dias em que você está disponível:</p>
         {!dias.length&&<div style={{textAlign:"center",color:`${C.ouro}50`,padding:40}}>Nenhum dia cadastrado.</div>}
         {dias.map(dia=>{
           const m=dispMembro(dia.id);
@@ -354,7 +346,6 @@ function TelaMembro({onVoltar}){
   );
 }
 
-// ── APP PRINCIPAL ─────────────────────────────────────────────────────────────
 const VIEWS=["📅 Dias","👥 Membros","🔗 Link","📊 Estatísticas","🎲 Sorteio","📋 Histórico"];
 const isMembro=window.location.search.includes("membro=1");
 
@@ -488,8 +479,6 @@ export default function App(){
   const statsPre=calcPre(dias,membros,disponibilidades);
   const statsPos=sorteioAtual?calcPos(sorteioAtual,membros,disponibilidades):null;
 
-  const resultadoFiltrado=sorteioAtual?.resultado?.map(dia=>({...dia}));
-
   if(simMembro) return <TelaMembro onVoltar={()=>setSimMembro(false)}/>;
   if(loading) return <div style={bgApp}><Spinner/></div>;
 
@@ -497,10 +486,9 @@ export default function App(){
     <div style={bgApp}>
       {/* HEADER */}
       <div style={{textAlign:"center",padding:"20px 24px 12px",borderBottom:`1px solid ${C.ouro}40`,background:"rgba(0,0,0,0.25)"}}>
+        <img src={BRASAO} alt="Brasão MSA Natividade" style={{width:90,height:90,objectFit:"contain",marginBottom:8,filter:"drop-shadow(0 2px 8px rgba(201,168,76,0.4))"}}/>
         <div style={{fontSize:9,letterSpacing:6,color:C.ouro,textTransform:"uppercase",marginBottom:3}}>Painel do Organizador</div>
-        <h1 style={{margin:0,fontSize:"clamp(16px,4vw,26px)",fontWeight:400,color:C.branco,letterSpacing:3}}>
-          <span style={{color:C.ouro}}>✦</span> Escala Litúrgica <span style={{color:C.ouro}}>✦</span>
-        </h1>
+        <h1 style={{margin:0,fontSize:"clamp(16px,4vw,26px)",fontWeight:400,color:C.branco,letterSpacing:3}}>Escala Litúrgica</h1>
         <div style={{fontSize:10,color:C.ouro,letterSpacing:3,marginTop:2}}>MSA NATIVIDADE</div>
         <div style={{width:80,height:1,background:`linear-gradient(90deg,transparent,${C.ouro},transparent)`,margin:"8px auto 0"}}/>
       </div>
@@ -513,7 +501,7 @@ export default function App(){
 
       <div style={{maxWidth:960,margin:"0 auto",padding:"16px 12px 48px"}}>
 
-        {/* ── DIAS ── */}
+        {/* DIAS */}
         {view===0&&(
           <div>
             <p style={{color:C.ouroPale,fontSize:13,marginBottom:12}}>Credenciais: <strong style={{color:C.ouroClaro}}>2</strong> semana · <strong style={{color:C.ouroClaro}}>3</strong> domingos.</p>
@@ -555,12 +543,11 @@ export default function App(){
               {formDia.solenidade&&(
                 <div style={{marginBottom:10}}>
                   <label style={lbl}>Nome da Solenidade</label>
-                  <input placeholder="Ex: Corpus Christi, Nossa Senhora…" value={formDia.nomeSolenidade} onChange={e=>setFormDia(p=>({...p,nomeSolenidade:e.target.value}))} style={inp}/>
+                  <input placeholder="Ex: Corpus Christi…" value={formDia.nomeSolenidade} onChange={e=>setFormDia(p=>({...p,nomeSolenidade:e.target.value}))} style={inp}/>
                 </div>
               )}
               <button onClick={addDia} disabled={salvando} style={{...btnPri,opacity:salvando?.7:1}}>+ Adicionar dia</button>
             </Card>
-
             {!dias.length&&<div style={{textAlign:"center",color:`${C.ouro}50`,padding:28,fontSize:13}}>Nenhum dia adicionado.</div>}
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
               {dias.map(dia=>(
@@ -583,7 +570,7 @@ export default function App(){
           </div>
         )}
 
-        {/* ── MEMBROS ── */}
+        {/* MEMBROS */}
         {view===1&&(
           <div>
             <Card style={{marginBottom:12}}>
@@ -624,7 +611,7 @@ export default function App(){
           </div>
         )}
 
-        {/* ── LINK ── */}
+        {/* LINK */}
         {view===2&&(
           <div>
             <Card style={{marginBottom:12,textAlign:"center"}}>
@@ -653,7 +640,7 @@ export default function App(){
           </div>
         )}
 
-        {/* ── ESTATÍSTICAS ── */}
+        {/* ESTATÍSTICAS */}
         {view===3&&(
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <Card>
@@ -718,7 +705,7 @@ export default function App(){
           </div>
         )}
 
-        {/* ── SORTEIO ── */}
+        {/* SORTEIO */}
         {view===4&&(
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
@@ -728,7 +715,6 @@ export default function App(){
                 {sorteioAtual&&<button onClick={salvarHistorico} disabled={salvando} style={{...btnSec,fontSize:12,opacity:salvando?.7:1}}>💾 Salvar</button>}
               </div>
             </div>
-
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
               <div>
                 <label style={lbl}>Nome da escala</label>
@@ -739,14 +725,12 @@ export default function App(){
                 <input placeholder="Digite um nome…" value={buscaSorteio} onChange={e=>setBuscaSorteio(e.target.value)} style={inp}/>
               </div>
             </div>
-
             {sorteioAtual?.observacoes?.length>0&&(
               <Card style={{marginBottom:10,border:`1px solid #ff884450`}}>
                 <SecTitle>⚠️ Observações</SecTitle>
                 {sorteioAtual.observacoes.map((o,i)=><div key={i} style={{color:"#ffaa66",fontSize:12,marginBottom:3}}>• {o.motivo}</div>)}
               </Card>
             )}
-
             {sorteioAtual?.pendentes?.length>0&&(
               <Card style={{marginBottom:10,border:`1px solid #88ddff40`}}>
                 <SecTitle>🔖 Prioridade na próxima escala</SecTitle>
@@ -754,10 +738,8 @@ export default function App(){
                   {(sorteioAtual.pendentes||[]).map(p=>{const n=p.nome||p;return<Tag key={n} label={`${n.split(" ").slice(0,2).join(" ")}${p.score>0?" ★"+p.score:""}`} color="#88ddff"/>;})}</div>
               </Card>
             )}
-
             {!sorteioAtual&&<div style={{textAlign:"center",color:`${C.ouro}50`,padding:40,fontSize:13}}>Clique em "Gerar" para sortear.</div>}
-
-            {resultadoFiltrado?.map((dia,idx)=>{
+            {sorteioAtual?.resultado?.map((dia,idx)=>{
               const falta=dia.funcs.some(({nome:fn,qtd})=>Object.entries(dia.alocados||{}).filter(([,f])=>f===fn).length<qtd);
               return(
                 <Card key={idx} style={{marginBottom:10,border:`1px solid ${falta?"#ff884460":dia.solenidade?"#f0c06050":C.ouro+"30"}`}}>
@@ -776,7 +758,6 @@ export default function App(){
                       {editandoManual===dia.id?"✕ Fechar":"✏️ Manual"}
                     </button>
                   </div>
-
                   {editandoManual===dia.id&&(
                     <div style={{background:"rgba(0,0,0,0.3)",borderRadius:8,padding:12,marginBottom:10,border:`1px solid ${C.ouro}30`}}>
                       <div style={{fontSize:11,color:C.ouro,marginBottom:8}}>Defina manualmente — o restante será preenchido automaticamente:</div>
@@ -805,7 +786,6 @@ export default function App(){
                       <button onClick={()=>{gerarSorteio();setEditandoManual(null);}} style={{...btnPri,marginTop:10,fontSize:12}}>🎲 Gerar com manual aplicado</button>
                     </div>
                   )}
-
                   <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))",gap:6}}>
                     {dia.funcs.map(({nome:fn,qtd})=>{
                       const pessoas=Object.entries(dia.alocados||{}).filter(([,f])=>f===fn).map(([n])=>n);
@@ -834,7 +814,7 @@ export default function App(){
           </div>
         )}
 
-        {/* ── HISTÓRICO ── */}
+        {/* HISTÓRICO */}
         {view===5&&(
           <div>
             <SecTitle>📋 Histórico de escalas</SecTitle>
