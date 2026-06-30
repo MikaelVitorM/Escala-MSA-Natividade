@@ -808,6 +808,37 @@ export default function App(){
                       );
                     })}
                   </div>
+
+                  {/* SUGESTÕES DE SUBSTITUTOS */}
+                  {(()=>{
+                    const escaladosNoDia=new Set(Object.keys(dia.alocados||{}));
+                    const dispDia=disponibilidades[dia.id]||[];
+                    const substitutos=membros
+                      .filter(m=>dispDia.includes(m.nome)&&!escaladosNoDia.has(m.nome))
+                      .sort((a,b)=>{
+                        // prioridade: maior score, depois quem foi menos escalado no sorteio atual
+                        const escA=sorteioAtual?.escAtual?.[a.nome]||0;
+                        const escB=sorteioAtual?.escAtual?.[b.nome]||0;
+                        if(escA!==escB) return escA-escB;
+                        return (b.score||0)-(a.score||0);
+                      })
+                      .slice(0,5);
+                    if(!substitutos.length) return null;
+                    return(
+                      <div style={{marginTop:10,background:"rgba(0,0,0,0.2)",borderRadius:8,padding:"8px 10px",border:`1px solid ${C.ouro}20`}}>
+                        <div style={{fontSize:10,color:`${C.ouro}90`,letterSpacing:1,marginBottom:5,textTransform:"uppercase"}}>💡 Sugestões caso haja faltas</div>
+                        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                          {substitutos.map((m,i)=>(
+                            <div key={m.nome} style={{display:"flex",alignItems:"center",gap:4,background:`${C.ouro}12`,border:`1px solid ${C.ouro}30`,borderRadius:5,padding:"2px 7px",fontSize:11,color:C.ouroPale}}>
+                              <span style={{color:C.ouro,fontSize:10,fontWeight:700}}>{i+1}º</span>
+                              {m.nome.split(" ").slice(0,2).join(" ")}
+                              {m.score>0&&<span style={{color:C.ouro,fontSize:10}}>★{m.score}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </Card>
               );
             })}
