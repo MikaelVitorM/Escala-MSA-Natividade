@@ -42,7 +42,8 @@ async function dbUpsertDisp(membro_id, dia_id) {
 const IGREJAS = [
   "Paroquia Natividade - Presbitério","Paroquia Natividade - Capela do Santíssimo",
   "Menino Jesus de Praga","Nossa Senhora das Graças","São Sebastião",
-  "São Pedro e São Paulo","Nossa Senhora Auxiliadora","Núcleo Santa Mônica","Núcleo Caminhando com Maria",
+  "São Pedro e São Paulo","Nossa Senhora Auxiliadora","Núcleo Santa Mônica",
+  "Núcleo Caminhando com Maria","São José","Nossa Senhora de Guadalupe",
 ];
 const IGREJAS_RESTRITAS = { "Paroquia Natividade - Capela do Santíssimo": ["Librifero","Credencial"] };
 const HORARIOS_FIXOS = ["7h","8h","9h","18h","19h","19h30","20h"];
