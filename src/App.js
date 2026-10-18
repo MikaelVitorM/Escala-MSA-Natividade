@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import * as XLSX from "xlsx";
 
 const SUPABASE_URL = "https://sdhxphydfowlftoiwjwt.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNkaHhwaHlkZm93bGZ0b2l3and0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEyMTA1MjAsImV4cCI6MjA5Njc4NjUyMH0._CFXjTwjx9I42MeRxIX7AJP5v3Qp5Cf1mdCSu1urC-0";
 const BRASAO = "https://i.imgur.com/ejDFAD0.png";
 
+// ── acesso ao Supabase ────────────────────────────────────────────────────────
 async function sbFetch(path, opts = {}) {
   const { headers: extra = {}, ...rest } = opts;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
@@ -25,6 +26,19 @@ async function sbFetch(path, opts = {}) {
 const dbGet    = (t, qs = "") => sbFetch(`${t}?${qs}`);
 const dbInsert = (t, body)    => sbFetch(t, { method: "POST", body: JSON.stringify(body) });
 const dbDelete = (t, qs)      => sbFetch(`${t}?${qs}`, { method: "DELETE" });
+const dbPatch  = (t, qs, body) => sbFetch(`${t}?${qs}`, { method: "PATCH", body: JSON.stringify(body) });
+
+// o Supabase devolve no máximo 1000 linhas por consulta — esta função busca tudo em lotes
+async function dbGetAll(t, qs = "") {
+  const todos = [];
+  const passo = 1000;
+  for (let off = 0; ; off += passo) {
+    const lote = await dbGet(t, `${qs}&limit=${passo}&offset=${off}`);
+    todos.push(...lote);
+    if (lote.length < passo) break;
+  }
+  return todos;
+}
 
 async function dbUpsertDisp(membro_id, dia_id) {
   await fetch(`${SUPABASE_URL}/rest/v1/disponibilidades`, {
@@ -39,6 +53,7 @@ async function dbUpsertDisp(membro_id, dia_id) {
   });
 }
 
+// ── constantes ────────────────────────────────────────────────────────────────
 const IGREJAS = [
   "Paroquia Natividade - Presbitério","Paroquia Natividade - Capela do Santíssimo",
   "Menino Jesus de Praga","Nossa Senhora das Graças","São Sebastião",
@@ -46,23 +61,41 @@ const IGREJAS = [
   "Núcleo Caminhando com Maria","São José","Nossa Senhora de Guadalupe",
 ];
 const IGREJAS_RESTRITAS = { "Paroquia Natividade - Capela do Santíssimo": ["Librifero","Credencial"] };
+// comunidades com no máximo 4 escalados: 1 librifero, 1 microfone, 2 credenciais
+const COMUNIDADES_4 = ["São José","Nossa Senhora de Guadalupe"];
 const HORARIOS_FIXOS = ["7h","8h","9h","18h","19h","19h30","20h"];
 const FUNCOES_BASE = [
   "Cerimoniário Principal","Cerimoniário Regente",
   "Librifero","Microfone","Credencial",
   "Ceroferário","Turiferário","Naveteiro",
-  "Baculífero","Mitrífero"
+  "Baculífero","Mitrífero",
 ];
 const FUNCOES_SEM_REPETICAO = ["Turiferário","Credencial"];
 const HIERARQUIA_SCORE = [
   "Credencial","Ceroferário","Microfone","Librifero",
   "Turiferário","Naveteiro","Baculífero","Mitrífero",
-  "Cerimoniário Regente","Cerimoniário Principal"
+  "Cerimoniário Regente","Cerimoniário Principal",
 ];
+const DIA_VAZIO = { data:"", horario:"", horarioCustom:"", usarCustom:false, igreja:"", temIncenso:false, temBispo:false, solenidade:false, nomeSolenidade:"" };
+
+const STATUS = {
+  presenca:    { label:"PRESENÇA",    bg:"#c6efce", fg:"#006100" },
+  falta:       { label:"FALTA",       bg:"#ffc7ce", fg:"#9c0006" },
+  justificada: { label:"JUSTIFICADA", bg:"#ffeb9c", fg:"#9c5700" },
+};
+const proximoStatus = s => s==="presenca" ? "falta" : s==="falta" ? "justificada" : s==="justificada" ? undefined : "presenca";
 
 const norm = s => s ? s.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim() : "";
 const isDomingo = d => d ? new Date(d+"T12:00:00").getDay()===0 : false;
 const fmtData   = d => d ? new Date(d+"T12:00:00").toLocaleDateString("pt-BR",{weekday:"long",day:"2-digit",month:"long"}) : "";
+const fmtDataCurta = d => d ? new Date(d+"T12:00:00").toLocaleDateString("pt-BR") : "";
+
+const ordenarEventos = arr => [...arr].sort((a,b)=>{
+  if (a.data && b.data && a.data!==b.data) return a.data<b.data ? -1 : 1;
+  if (a.data && !b.data) return -1;
+  if (!a.data && b.data) return 1;
+  return String(a.criado_em||"")<String(b.criado_em||"") ? -1 : 1;
+});
 
 const C = {
   vermelho:"#8B0000", ouro:"#C9A84C", ouroClaro:"#E8C96D",
@@ -70,12 +103,20 @@ const C = {
 };
 const bgApp = { minHeight:"100vh", background:"linear-gradient(160deg,#6B0000 0%,#8B0000 40%,#5A0000 100%)", fontFamily:"Georgia,serif", color:C.brancoOff };
 
+// ── funções necessárias por missa ─────────────────────────────────────────────
 function getFuncoesNecessarias(dia) {
+  if (COMUNIDADES_4.includes(dia.igreja)) {
+    return [
+      {nome:"Librifero",  qtd:1},
+      {nome:"Microfone",  qtd:1},
+      {nome:"Credencial", qtd:2},
+    ];
+  }
   if (IGREJAS_RESTRITAS[dia.igreja]) return [{nome:"Librifero",qtd:1},{nome:"Credencial",qtd:1}];
-  const dom    = isDomingo(dia.data);
-  const bispo  = dia.tem_bispo||dia.temBispo;
-  const incenso= dia.tem_incenso||dia.temIncenso;
-  const funcs  = [
+  const dom     = isDomingo(dia.data);
+  const bispo   = dia.tem_bispo || dia.temBispo;
+  const incenso = dia.tem_incenso || dia.temIncenso;
+  const funcs = [
     {nome:"Cerimoniário Principal",qtd:1},
     {nome:"Cerimoniário Regente",  qtd:1},
     {nome:"Librifero",   qtd:1},
@@ -83,15 +124,16 @@ function getFuncoesNecessarias(dia) {
     {nome:"Ceroferário", qtd:2},
     {nome:"Credencial",  qtd:dom?3:2},
   ];
-  if (incenso||dom) {
-    funcs.find(f=>f.nome==="Ceroferário").qtd=6;
+  if (incenso || dom) {
+    funcs.find(f=>f.nome==="Ceroferário").qtd = 6;
     if (incenso) funcs.push({nome:"Turiferário",qtd:1},{nome:"Naveteiro",qtd:1});
-    if (dom&&!incenso) funcs.find(f=>f.nome==="Credencial").qtd=3;
+    if (dom && !incenso) funcs.find(f=>f.nome==="Credencial").qtd = 3;
   }
   if (bispo) funcs.push({nome:"Baculífero",qtd:1},{nome:"Mitrífero",qtd:1});
   return funcs;
 }
 
+// ── algoritmo de sorteio ──────────────────────────────────────────────────────
 function sortearEscala(dias, membros, disponibilidades, historico, manualSlots={}) {
   const escHist={}, fnHist={}, bispoHist=new Set();
   membros.forEach(m=>{ escHist[m.nome]=0; fnHist[m.nome]={}; });
@@ -198,6 +240,7 @@ function sortearEscala(dias, membros, disponibilidades, historico, manualSlots={
   return {resultado,observacoes,pendentes,escAtual};
 }
 
+// ── estatísticas ──────────────────────────────────────────────────────────────
 function calcPre(dias,membros,disponibilidades){
   const dispPorMembro={},dispPorDia={};
   membros.forEach(m=>{dispPorMembro[m.nome]=0;});
@@ -221,6 +264,37 @@ function calcPos({resultado,pendentes},membros,disponibilidades){
   return{escaladoPor,dispPor,media:count>0?(total/count).toFixed(1):0,pendentes};
 }
 
+// estatísticas de cada membro: presenças em eventos + escalas salvas
+function calcStatsMembros(membros, historico, presMap) {
+  const out = {};
+  const idPorNome = {};
+  membros.forEach(m => {
+    out[m.id] = { pres:0, falta:0, just:0, escalado:0, fnCount:{}, fnTop:null };
+    idPorNome[norm(m.nome)] = m.id;
+  });
+  Object.entries(presMap).forEach(([k, st]) => {
+    const s = out[k.split("|")[1]];
+    if (!s) return;
+    if (st === "presenca") s.pres++;
+    else if (st === "falta") s.falta++;
+    else if (st === "justificada") s.just++;
+  });
+  historico.forEach(h => (h.resultado || []).forEach(d =>
+    Object.entries(d.alocados || {}).forEach(([nome, fn]) => {
+      const s = out[idPorNome[norm(nome)]];
+      if (!s) return;
+      s.escalado++;
+      s.fnCount[fn] = (s.fnCount[fn] || 0) + 1;
+    })
+  ));
+  Object.values(out).forEach(s => {
+    const top = Object.entries(s.fnCount).sort((a, b) => b[1] - a[1])[0];
+    if (top) s.fnTop = { nome: top[0], qtd: top[1] };
+  });
+  return out;
+}
+
+// ── componentes base ──────────────────────────────────────────────────────────
 function Tag({label,onRemove,color}){
   const c=color||C.ouro;
   return <span style={{display:"inline-flex",alignItems:"center",gap:4,background:`${c}25`,color:c,border:`1px solid ${c}60`,borderRadius:6,padding:"2px 8px",fontSize:12}}>
@@ -230,7 +304,55 @@ function Tag({label,onRemove,color}){
 function Card({children,style={}}){ return <div style={{background:"rgba(0,0,0,0.25)",border:`1px solid ${C.ouro}35`,borderRadius:12,padding:18,...style}}>{children}</div>; }
 function SecTitle({children}){ return <div style={{fontSize:11,color:C.ouro,letterSpacing:2,textTransform:"uppercase",marginBottom:12}}>{children}</div>; }
 function Spinner(){ return <div style={{textAlign:"center",padding:60,color:C.ouro,fontSize:14}}>⏳ Carregando…</div>; }
+function Mini({label,valor,cor}){
+  return <div style={{background:"rgba(0,0,0,0.25)",borderRadius:6,padding:"5px 4px",textAlign:"center"}}>
+    <div style={{fontSize:16,fontWeight:700,color:cor}}>{valor}</div>
+    <div style={{fontSize:9,color:C.ouroPale,letterSpacing:.5,textTransform:"uppercase"}}>{label}</div>
+  </div>;
+}
 
+// formulário de cadastro / edição de membro
+function FormMembro({inicial,onSalvar,onCancelar,salvando}){
+  const [nome,setNome]=useState(inicial?.nome||"");
+  const [score,setScore]=useState(inicial?String(inicial.score??0):"0");
+  const [funcoes,setFuncoes]=useState(inicial?.funcoes||[]);
+  const tem=f=>funcoes.some(x=>norm(x)===norm(f));
+  const toggle=f=>setFuncoes(p=>tem(f)?p.filter(x=>norm(x)!==norm(f)):[...p,f]);
+  const salvar=()=>{
+    if(!nome.trim()) return;
+    onSalvar({nome:nome.trim(),funcoes,score:parseFloat(String(score).replace(",","."))||0});
+  };
+  return(
+    <div style={{background:"rgba(0,0,0,0.35)",border:`1px solid ${C.ouro}60`,borderRadius:12,padding:16}}>
+      <SecTitle>{inicial?"✏️ Editar membro":"➕ Novo membro"}</SecTitle>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:10,marginBottom:10}}>
+        <div>
+          <label style={lbl}>Nome completo</label>
+          <input value={nome} onChange={e=>setNome(e.target.value)} placeholder="Nome do membro" style={inp}/>
+          {inicial&&<div style={{fontSize:10,color:`${C.ouro}80`,marginTop:3}}>Alterar o nome não atualiza escalas já salvas no histórico.</div>}
+        </div>
+        <div>
+          <label style={lbl}>Escore</label>
+          <input type="number" step="any" value={score} onChange={e=>setScore(e.target.value)} style={inp}/>
+        </div>
+      </div>
+      <label style={lbl}>Funções que pode desempenhar</label>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))",gap:6,marginBottom:12}}>
+        {FUNCOES_BASE.map(f=>(
+          <label key={f} style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer",fontSize:12,color:tem(f)?C.ouroClaro:C.ouroPale,background:tem(f)?`${C.ouro}20`:"rgba(0,0,0,0.2)",border:`1px solid ${tem(f)?C.ouro:C.ouro+"30"}`,borderRadius:6,padding:"6px 8px"}}>
+            <input type="checkbox" checked={tem(f)} onChange={()=>toggle(f)} style={{accentColor:C.ouro}}/>{f}
+          </label>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={salvar} disabled={salvando||!nome.trim()} style={{...btnPri,opacity:(salvando||!nome.trim())?.6:1}}>{salvando?"⏳ Salvando…":"💾 Salvar"}</button>
+        <button onClick={onCancelar} style={btnSec}>Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+// ── TELA DO MEMBRO ────────────────────────────────────────────────────────────
 function TelaMembro({onVoltar}){
   const [membros,setMembros]=useState([]);
   const [dias,setDias]=useState([]);
@@ -247,7 +369,7 @@ function TelaMembro({onVoltar}){
         const [ms,ds,dps]=await Promise.all([
           dbGet("membros","select=id,nome&order=nome"),
           dbGet("dias_escala","select=*&order=data,horario"),
-          dbGet("disponibilidades","select=membro_id,dia_id"),
+          dbGetAll("disponibilidades","select=membro_id,dia_id&order=id"),
         ]);
         setMembros(ms); setDias(ds);
         const map={};
@@ -347,45 +469,72 @@ function TelaMembro({onVoltar}){
   );
 }
 
-const VIEWS=["📅 Dias","👥 Membros","🔗 Link","📊 Estatísticas","🎲 Sorteio","📋 Histórico"];
-const isMembro=window.location.search.includes("membro=1");
+// ── PAINEL DO ORGANIZADOR ─────────────────────────────────────────────────────
+const ABAS=[["cadastro","👥 CADASTRO"],["escalas","📋 ESCALAS"],["eventos","📅 REUNIÕES E EVENTOS"]];
+const SUBS=[["dias","📅 Dias"],["link","🔗 Link"],["estatisticas","📊 Estatísticas"],["sorteio","🎲 Sorteio"],["historico","📋 Histórico"]];
 
-export default function App(){
-  if(isMembro) return <TelaMembro/>;
-
-  const [view,setView]=useState(0);
+function Painel(){
+  const [aba,setAba]=useState("escalas");
+  const [sub,setSub]=useState("dias");
   const [simMembro,setSimMembro]=useState(false);
+
   const [dias,setDias]=useState([]);
   const [membros,setMembros]=useState([]);
   const [disponibilidades,setDisponibilidades]=useState({});
   const [historico,setHistorico]=useState([]);
+  const [eventos,setEventos]=useState([]);
+  const [presMap,setPresMap]=useState({});
+  const [eventosOk,setEventosOk]=useState(true);
+
   const [sorteioAtual,setSorteioAtual]=useState(null);
   const [manualSlots,setManualSlots]=useState({});
   const [editandoManual,setEditandoManual]=useState(null);
   const [buscaSorteio,setBuscaSorteio]=useState("");
-  const [formDia,setFormDia]=useState({data:"",horario:"",horarioCustom:"",usarCustom:false,igreja:"",temIncenso:false,temBispo:false,solenidade:false,nomeSolenidade:""});
+  const [nomeEscala,setNomeEscala]=useState("");
+  const [formDia,setFormDia]=useState(DIA_VAZIO);
+
+  const [formEvento,setFormEvento]=useState({nome:"",descricao:"",data:""});
+  const [buscaMembro,setBuscaMembro]=useState("");
+  const [buscaEvento,setBuscaEvento]=useState("");
+  const [editandoId,setEditandoId]=useState(null);
   const [xlsxStatus,setXlsxStatus]=useState(null);
   const [xlsxMsg,setXlsxMsg]=useState("");
-  const [nomeEscala,setNomeEscala]=useState("");
+
   const [loading,setLoading]=useState(true);
   const [salvando,setSalvando]=useState(false);
 
+  // ── carregamento ──
   const carregarDados=async(completo=false)=>{
     try{
-      const promises=[
+      const [ds,ms,dps]=await Promise.all([
         dbGet("dias_escala","select=*&order=data,horario"),
         dbGet("membros","select=*&order=nome"),
-        dbGet("disponibilidades","select=membro_id,dia_id"),
-      ];
-      if(completo) promises.push(dbGet("historico_escalas","select=*&order=criado_em.desc"));
-      const [ds,ms,dps,hs]=await Promise.all(promises);
+        dbGetAll("disponibilidades","select=membro_id,dia_id&order=id"),
+      ]);
       setDias(ds); setMembros(ms);
-      if(completo&&hs) setHistorico(hs.map(h=>({...h,resultado:h.resultado||[]})));
       const map={};
       for(const d of ds) map[d.id]=[];
       for(const dp of dps){const m=ms.find(x=>x.id===dp.membro_id);if(m&&map[dp.dia_id])map[dp.dia_id].push(m.nome);}
       setDisponibilidades(map);
     }catch(e){console.error(e);}
+
+    if(completo){
+      try{
+        const hs=await dbGet("historico_escalas","select=*&order=criado_em.desc");
+        setHistorico(hs.map(h=>({...h,resultado:h.resultado||[]})));
+      }catch(e){console.error(e);}
+      try{
+        const [evs,prs]=await Promise.all([
+          dbGet("eventos","select=*&order=criado_em"),
+          dbGetAll("presencas","select=evento_id,membro_id,status&order=id"),
+        ]);
+        setEventos(ordenarEventos(evs));
+        const mapa={};
+        prs.forEach(p=>{mapa[`${p.evento_id}|${p.membro_id}`]=p.status;});
+        setPresMap(mapa);
+        setEventosOk(true);
+      }catch(e){console.error(e);setEventosOk(false);}
+    }
     setLoading(false);
   };
 
@@ -395,6 +544,7 @@ export default function App(){
     return()=>clearInterval(iv);
   },[]);
 
+  // ── dias da escala ──
   const addDia=async()=>{
     const horario=formDia.usarCustom?formDia.horarioCustom:formDia.horario;
     if(!formDia.data||!horario||!formDia.igreja)return;
@@ -403,7 +553,7 @@ export default function App(){
       const [novo]=await dbInsert("dias_escala",[{data:formDia.data,horario,igreja:formDia.igreja,tem_incenso:formDia.temIncenso,tem_bispo:formDia.temBispo,solenidade:formDia.solenidade,nome_solenidade:formDia.nomeSolenidade||null}]);
       setDias(p=>[...p,novo]);
       setDisponibilidades(p=>({...p,[novo.id]:[]}));
-      setFormDia({data:"",horario:"",horarioCustom:"",usarCustom:false,igreja:"",temIncenso:false,temBispo:false,solenidade:false,nomeSolenidade:""});
+      setFormDia(DIA_VAZIO);
     }catch(e){alert("Erro: "+e.message);}
     setSalvando(false);
   };
@@ -412,6 +562,36 @@ export default function App(){
     await dbDelete("dias_escala",`id=eq.${id}`);
     setDias(p=>p.filter(d=>d.id!==id));
     setDisponibilidades(p=>{const n={...p};delete n[id];return n;});
+  };
+
+  // ── cadastro de membros ──
+  const salvarMembro=async(dados,id)=>{
+    if(!id && membros.some(m=>norm(m.nome)===norm(dados.nome))){
+      alert("Já existe um membro com esse nome.");
+      return;
+    }
+    setSalvando(true);
+    try{
+      if(id){
+        const [atual]=await dbPatch("membros",`id=eq.${id}`,dados);
+        setMembros(p=>p.map(m=>m.id===id?{...m,...(atual||dados)}:m));
+      } else {
+        const [novo]=await dbInsert("membros",[dados]);
+        setMembros(p=>[...p,novo]);
+      }
+      setEditandoId(null);
+    }catch(e){alert("Erro ao salvar membro: "+e.message);}
+    setSalvando(false);
+  };
+
+  const removerMembro=async(m)=>{
+    if(!window.confirm(`Remover ${m.nome}? As disponibilidades e presenças dessa pessoa também serão apagadas.`))return;
+    try{
+      await dbDelete("membros",`id=eq.${m.id}`);
+      setMembros(p=>p.filter(x=>x.id!==m.id));
+      setDisponibilidades(p=>{const n={};Object.entries(p).forEach(([k,v])=>{n[k]=v.filter(x=>x!==m.nome);});return n;});
+      setPresMap(p=>{const n={};Object.entries(p).forEach(([k,v])=>{if(k.split("|")[1]!==m.id)n[k]=v;});return n;});
+    }catch(e){alert("Erro ao remover: "+e.message);}
   };
 
   const importarXlsx=async(e)=>{
@@ -437,13 +617,24 @@ export default function App(){
           .filter(f=>FUNCOES_BASE.some(fb=>norm(fb)===norm(f)));
         novos.push({nome,funcoes,score});
       });
-      try{await dbDelete("membros","id=neq.00000000-0000-0000-0000-000000000000");}catch(e){console.log(e);}
-      await new Promise(r=>setTimeout(r,600));
-      const inseridos=await dbInsert("membros",novos.map(m=>({nome:m.nome,funcoes:m.funcoes,score:m.score})));
-      setMembros(Array.isArray(inseridos)?inseridos:[]);
-      await carregarDados(true);
-      setXlsxStatus("ok");setXlsxMsg(`${novos.length} membro(s) importado(s).`);
-    }catch(e){setXlsxStatus("erro");setXlsxMsg("Erro: "+e.message);}
+
+      // atualiza quem já existe (pelo nome) e cria quem é novo — sem apagar ninguém
+      const existentes=await dbGetAll("membros","select=id,nome&order=id");
+      const mapa={};
+      existentes.forEach(m=>{mapa[norm(m.nome)]=m.id;});
+      const patches=[];
+      const inserir=[];
+      novos.forEach(m=>{
+        const id=mapa[norm(m.nome)];
+        if(id) patches.push(dbPatch("membros",`id=eq.${id}`,{funcoes:m.funcoes,score:m.score}));
+        else inserir.push({nome:m.nome,funcoes:m.funcoes,score:m.score});
+      });
+      await Promise.all(patches);
+      if(inserir.length) await dbInsert("membros",inserir);
+      await carregarDados(false);
+      setXlsxStatus("ok");
+      setXlsxMsg(`${patches.length} atualizado(s), ${inserir.length} novo(s).`);
+    }catch(err){setXlsxStatus("erro");setXlsxMsg("Erro: "+err.message);}
     e.target.value="";
   };
 
@@ -455,9 +646,71 @@ export default function App(){
     XLSX.writeFile(wb,"modelo-escala.xlsx");
   };
 
+  // ── eventos e presenças ──
+  const addEvento=async()=>{
+    if(!formEvento.nome.trim())return;
+    setSalvando(true);
+    try{
+      const [novo]=await dbInsert("eventos",[{nome:formEvento.nome.trim(),descricao:formEvento.descricao.trim()||null,data:formEvento.data||null}]);
+      setEventos(p=>ordenarEventos([...p,novo]));
+      setFormEvento({nome:"",descricao:"",data:""});
+    }catch(e){alert("Erro ao salvar evento: "+e.message);}
+    setSalvando(false);
+  };
+
+  const removerEvento=async(ev)=>{
+    if(!window.confirm(`Remover o evento "${ev.nome}" e todas as presenças registradas nele?`))return;
+    try{
+      await dbDelete("eventos",`id=eq.${ev.id}`);
+      setEventos(p=>p.filter(x=>x.id!==ev.id));
+      setPresMap(p=>{const n={};Object.entries(p).forEach(([k,v])=>{if(!k.startsWith(ev.id+"|"))n[k]=v;});return n;});
+    }catch(e){alert("Erro ao remover: "+e.message);}
+  };
+
+  const definirStatus=async(eventoId,membroId,novo)=>{
+    const k=`${eventoId}|${membroId}`;
+    const anterior=presMap[k];
+    setPresMap(p=>{const n={...p};if(novo)n[k]=novo;else delete n[k];return n;});
+    try{
+      if(novo){
+        await sbFetch("presencas?on_conflict=evento_id,membro_id",{
+          method:"POST",
+          headers:{Prefer:"resolution=merge-duplicates,return=representation"},
+          body:JSON.stringify([{evento_id:eventoId,membro_id:membroId,status:novo}]),
+        });
+      } else {
+        await dbDelete("presencas",`evento_id=eq.${eventoId}&membro_id=eq.${membroId}`);
+      }
+    }catch(e){
+      setPresMap(p=>{const n={...p};if(anterior)n[k]=anterior;else delete n[k];return n;});
+      alert("Erro ao salvar presença: "+e.message);
+    }
+  };
+
+  const marcarTodosPresentes=async(ev)=>{
+    const pendentes=membros.filter(m=>!presMap[`${ev.id}|${m.id}`]);
+    if(!pendentes.length)return;
+    if(!window.confirm(`Marcar PRESENÇA para os ${pendentes.length} membro(s) que estão em branco?`))return;
+    const antes=presMap;
+    setPresMap(p=>{const n={...p};pendentes.forEach(m=>{n[`${ev.id}|${m.id}`]="presenca";});return n;});
+    try{
+      await sbFetch("presencas?on_conflict=evento_id,membro_id",{
+        method:"POST",
+        headers:{Prefer:"resolution=merge-duplicates,return=representation"},
+        body:JSON.stringify(pendentes.map(m=>({evento_id:ev.id,membro_id:m.id,status:"presenca"}))),
+      });
+    }catch(e){
+      setPresMap(antes);
+      alert("Erro ao salvar: "+e.message);
+    }
+  };
+
+  // ── sorteio ──
   const gerarSorteio=()=>{
     const r=sortearEscala(dias,membros,disponibilidades,historico,manualSlots);
-    setSorteioAtual(r);setView(4);
+    setSorteioAtual(r);
+    setAba("escalas");
+    setSub("sorteio");
   };
 
   const salvarHistorico=async()=>{
@@ -476,12 +729,19 @@ export default function App(){
     setHistorico(p=>p.filter(h=>h.id!==id));
   };
 
+  // ── derivados ──
   const linkMembro=`${window.location.origin}${window.location.pathname}?membro=1`;
   const statsPre=calcPre(dias,membros,disponibilidades);
   const statsPos=sorteioAtual?calcPos(sorteioAtual,membros,disponibilidades):null;
+  const statsMembros=useMemo(()=>calcStatsMembros(membros,historico,presMap),[membros,historico,presMap]);
+
+  const membrosCadastro=[...membros].filter(m=>norm(m.nome).includes(norm(buscaMembro))).sort((a,b)=>a.nome.localeCompare(b.nome));
+  const membrosEvento=[...membros].filter(m=>norm(m.nome).includes(norm(buscaEvento))).sort((a,b)=>a.nome.localeCompare(b.nome));
 
   if(simMembro) return <TelaMembro onVoltar={()=>setSimMembro(false)}/>;
   if(loading) return <div style={bgApp}><Spinner/></div>;
+
+  const thBase={background:"#3d0000",color:C.ouro,padding:"8px 6px",fontSize:11,letterSpacing:.5,borderBottom:`1px solid ${C.ouro}50`,borderRight:`1px solid ${C.ouro}20`,textAlign:"center",verticalAlign:"top"};
 
   return(
     <div style={bgApp}>
@@ -494,16 +754,99 @@ export default function App(){
         <div style={{width:80,height:1,background:`linear-gradient(90deg,transparent,${C.ouro},transparent)`,margin:"8px auto 0"}}/>
       </div>
 
-      <div style={{display:"flex",justifyContent:"center",flexWrap:"wrap",gap:3,padding:"10px 10px 0"}}>
-        {VIEWS.map((v,i)=>(
-          <button key={v} onClick={()=>setView(i)} style={{padding:"6px 12px",border:`1px solid ${view===i?C.ouro:C.ouro+"40"}`,borderRadius:7,cursor:"pointer",fontFamily:"inherit",fontSize:11,background:view===i?`linear-gradient(135deg,${C.ouro},#A07828)`:"rgba(0,0,0,0.2)",color:view===i?C.vermelho:C.ouroPale,fontWeight:view===i?"700":"400"}}>{v}</button>
+      {/* ABAS PRINCIPAIS */}
+      <div style={{display:"flex",justifyContent:"center",flexWrap:"wrap",gap:6,padding:"14px 10px 0"}}>
+        {ABAS.map(([k,t])=>(
+          <button key={k} onClick={()=>setAba(k)} style={{padding:"10px 20px",border:`1px solid ${aba===k?C.ouro:C.ouro+"50"}`,borderRadius:9,cursor:"pointer",fontFamily:"inherit",fontSize:13,letterSpacing:1,background:aba===k?`linear-gradient(135deg,${C.ouro},#A07828)`:"rgba(0,0,0,0.25)",color:aba===k?C.vermelho:C.ouroPale,fontWeight:aba===k?"700":"400"}}>{t}</button>
         ))}
       </div>
 
-      <div style={{maxWidth:960,margin:"0 auto",padding:"16px 12px 48px"}}>
+      {/* SUB-ABAS DE ESCALAS */}
+      {aba==="escalas"&&(
+        <div style={{display:"flex",justifyContent:"center",flexWrap:"wrap",gap:3,padding:"10px 10px 0"}}>
+          {SUBS.map(([k,t])=>(
+            <button key={k} onClick={()=>setSub(k)} style={{padding:"6px 12px",border:`1px solid ${sub===k?C.ouro:C.ouro+"40"}`,borderRadius:7,cursor:"pointer",fontFamily:"inherit",fontSize:11,background:sub===k?`${C.ouro}35`:"rgba(0,0,0,0.2)",color:sub===k?C.ouroClaro:C.ouroPale,fontWeight:sub===k?"700":"400"}}>{t}</button>
+          ))}
+        </div>
+      )}
 
-        {/* DIAS */}
-        {view===0&&(
+      <div style={{maxWidth:aba==="eventos"?1400:960,margin:"0 auto",padding:"16px 12px 48px"}}>
+
+        {/* ═════════ CADASTRO ═════════ */}
+        {aba==="cadastro"&&(
+          <div>
+            <Card style={{marginBottom:12}}>
+              <SecTitle>➕ Adicionar membros</SecTitle>
+              <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
+                <button onClick={()=>setEditandoId("novo")} style={btnPri}>+ Novo membro</button>
+                <label style={{...btnSec,display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer"}}>
+                  📎 Importar planilha (.xlsx)
+                  <input type="file" accept=".xlsx,.xls" onChange={importarXlsx} style={{position:"absolute",opacity:0,width:0,height:0}}/>
+                </label>
+                <button onClick={baixarModelo} style={{...btnSec,fontSize:12,padding:"8px 14px"}}>⬇ Modelo</button>
+                {xlsxStatus==="carregando"&&<span style={{color:C.ouro,fontSize:12}}>⏳ Importando…</span>}
+                {xlsxStatus==="ok"&&<span style={{color:"#6fcf6f",fontSize:12}}>✅ {xlsxMsg}</span>}
+                {xlsxStatus==="erro"&&<span style={{color:"#ff7044",fontSize:12}}>❌ {xlsxMsg}</span>}
+              </div>
+              <p style={{color:`${C.ouroPale}`,fontSize:11,margin:"10px 0 0",opacity:.8}}>
+                A planilha precisa das colunas <strong>Nome</strong>, <strong>Score</strong> e uma coluna por função com Sim/Não. Quem já está cadastrado (mesmo nome) é atualizado; quem é novo é adicionado. Ninguém é apagado pela importação.
+              </p>
+            </Card>
+
+            {editandoId==="novo"&&(
+              <div style={{marginBottom:12}}>
+                <FormMembro onSalvar={d=>salvarMembro(d,null)} onCancelar={()=>setEditandoId(null)} salvando={salvando}/>
+              </div>
+            )}
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
+              <div style={{fontSize:12,color:C.ouro,letterSpacing:2,textTransform:"uppercase"}}>{membros.length} membro(s) cadastrado(s)</div>
+              <input placeholder="🔍 Buscar membro…" value={buscaMembro} onChange={e=>setBuscaMembro(e.target.value)} style={{...inp,maxWidth:280}}/>
+            </div>
+
+            {!membros.length&&<div style={{textAlign:"center",color:`${C.ouro}50`,padding:36,fontSize:13}}>Nenhum membro cadastrado. Adicione um novo ou importe a planilha.</div>}
+
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(310px,1fr))",gap:10}}>
+              {membrosCadastro.map(m=>{
+                if(editandoId===m.id) return(
+                  <div key={m.id} style={{gridColumn:"1 / -1"}}>
+                    <FormMembro inicial={m} onSalvar={d=>salvarMembro(d,m.id)} onCancelar={()=>setEditandoId(null)} salvando={salvando}/>
+                  </div>
+                );
+                const s=statsMembros[m.id]||{pres:0,falta:0,just:0,escalado:0,fnTop:null};
+                return(
+                  <Card key={m.id} style={{padding:12,border:`1px solid ${(m.funcoes||[]).length>0?C.ouro+"50":C.ouro+"25"}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:6}}>
+                      <div style={{color:C.branco,fontSize:13,fontWeight:700,lineHeight:1.3}}>{m.nome}</div>
+                      <span style={{fontSize:11,color:C.ouro,background:`${C.ouro}20`,borderRadius:4,padding:"2px 7px",flexShrink:0}}>★ {m.score||0}</span>
+                    </div>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:8,minHeight:18}}>
+                      {(m.funcoes||[]).length===0
+                        ?<span style={{color:`${C.ouro}60`,fontSize:10}}>Sem funções cadastradas</span>
+                        :(m.funcoes||[]).map(f=><span key={f} style={{fontSize:10,background:`${C.ouro}20`,color:C.ouro,border:`1px solid ${C.ouro}40`,borderRadius:4,padding:"1px 5px"}}>{f}</span>)}
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:4}}>
+                      <Mini label="Presenças" valor={s.pres} cor="#7bd88f"/>
+                      <Mini label="Faltas" valor={s.falta} cor="#ff8a8a"/>
+                      <Mini label="Justificadas" valor={s.just} cor="#f0d060"/>
+                    </div>
+                    <div style={{marginTop:7,fontSize:11,color:C.ouroPale,lineHeight:1.5}}>
+                      🎲 Escalado <strong style={{color:C.ouroClaro}}>{s.escalado}</strong> vez(es)<br/>
+                      ⭐ Função que mais desempenha: <strong style={{color:C.ouroClaro}}>{s.fnTop?`${s.fnTop.nome} (${s.fnTop.qtd}x)`:"—"}</strong>
+                    </div>
+                    <div style={{display:"flex",gap:6,marginTop:9}}>
+                      <button onClick={()=>setEditandoId(m.id)} style={{...btnSec,fontSize:11,padding:"5px 12px"}}>✏️ Editar</button>
+                      <button onClick={()=>removerMembro(m)} style={{background:"rgba(150,0,0,0.6)",border:`1px solid ${C.ouro}40`,color:C.ouroPale,borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>🗑 Remover</button>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ═════════ ESCALAS ═════════ */}
+        {aba==="escalas"&&sub==="dias"&&(
           <div>
             <p style={{color:C.ouroPale,fontSize:13,marginBottom:12}}>Credenciais: <strong style={{color:C.ouroClaro}}>2</strong> semana · <strong style={{color:C.ouroClaro}}>3</strong> domingos.</p>
             <Card style={{marginBottom:14}}>
@@ -567,53 +910,11 @@ export default function App(){
                 </div>
               ))}
             </div>
-            {dias.length>0&&<div style={{textAlign:"right",marginTop:12}}><button onClick={()=>setView(1)} style={btnPri}>Próximo →</button></div>}
+            {dias.length>0&&<div style={{textAlign:"right",marginTop:12}}><button onClick={()=>setSub("link")} style={btnPri}>Próximo →</button></div>}
           </div>
         )}
 
-        {/* MEMBROS */}
-        {view===1&&(
-          <div>
-            <Card style={{marginBottom:12}}>
-              <SecTitle>📂 Importar via planilha (.xlsx)</SecTitle>
-              <p style={{color:C.ouroPale,fontSize:12,margin:"0 0 10px"}}>Colunas: <strong style={{color:C.ouroClaro}}>Nome</strong>, <strong style={{color:C.ouroClaro}}>Score</strong> e uma por função com <strong style={{color:C.ouroClaro}}>Sim/Não</strong>.</p>
-              <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
-                <label style={{...btnPri,display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer"}}>
-                  📎 Selecionar .xlsx
-                  <input type="file" accept=".xlsx,.xls" onChange={importarXlsx} style={{position:"absolute",opacity:0,width:0,height:0}}/>
-                </label>
-                <button onClick={baixarModelo} style={{...btnSec,fontSize:12,padding:"8px 14px"}}>⬇ Modelo</button>
-                {xlsxStatus==="carregando"&&<span style={{color:C.ouro,fontSize:12}}>⏳ Importando…</span>}
-                {xlsxStatus==="ok"&&<span style={{color:"#6fcf6f",fontSize:12}}>✅ {xlsxMsg}</span>}
-                {xlsxStatus==="erro"&&<span style={{color:"#ff7044",fontSize:12}}>❌ {xlsxMsg}</span>}
-              </div>
-            </Card>
-            {!membros.length
-              ?<div style={{textAlign:"center",color:`${C.ouro}50`,padding:36,fontSize:13}}>Nenhum membro importado.</div>
-              :<Card>
-                <SecTitle>{membros.length} membro(s) — ordenados por score</SecTitle>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(195px,1fr))",gap:6,maxHeight:420,overflowY:"auto"}}>
-                  {[...membros].sort((a,b)=>(b.score||0)-(a.score||0)).map(m=>(
-                    <div key={m.id} style={{background:"rgba(0,0,0,0.2)",border:`1px solid ${(m.funcoes||[]).length>0?C.ouro+"50":C.ouro+"20"}`,borderRadius:7,padding:"8px 10px"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-                        <div style={{color:C.branco,fontSize:12,fontWeight:600}}>{m.nome.split(" ").slice(0,2).join(" ")}</div>
-                        <span style={{fontSize:11,color:C.ouro,background:`${C.ouro}20`,borderRadius:4,padding:"1px 6px"}}>★ {m.score||0}</span>
-                      </div>
-                      <div style={{display:"flex",flexWrap:"wrap",gap:2}}>
-                        {(m.funcoes||[]).length===0?<span style={{color:`${C.ouro}50`,fontSize:9}}>Sem funções</span>
-                          :(m.funcoes||[]).map(f=><span key={f} style={{fontSize:9,background:`${C.ouro}20`,color:C.ouro,border:`1px solid ${C.ouro}40`,borderRadius:3,padding:"1px 3px"}}>{f}</span>)}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-            }
-            <div style={{textAlign:"right",marginTop:12}}><button onClick={()=>setView(2)} style={btnPri}>Próximo →</button></div>
-          </div>
-        )}
-
-        {/* LINK */}
-        {view===2&&(
+        {aba==="escalas"&&sub==="link"&&(
           <div>
             <Card style={{marginBottom:12,textAlign:"center"}}>
               <SecTitle>🔗 Link para os membros</SecTitle>
@@ -637,12 +938,11 @@ export default function App(){
                 </div>
               );})}
             </Card>
-            <div style={{textAlign:"right",marginTop:12}}><button onClick={()=>setView(3)} style={btnPri}>Ver Estatísticas →</button></div>
+            <div style={{textAlign:"right",marginTop:12}}><button onClick={()=>setSub("estatisticas")} style={btnPri}>Ver Estatísticas →</button></div>
           </div>
         )}
 
-        {/* ESTATÍSTICAS */}
-        {view===3&&(
+        {aba==="escalas"&&sub==="estatisticas"&&(
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <Card>
               <SecTitle>📊 Pré-sorteio</SecTitle>
@@ -706,8 +1006,7 @@ export default function App(){
           </div>
         )}
 
-        {/* SORTEIO */}
-        {view===4&&(
+        {aba==="escalas"&&sub==="sorteio"&&(
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
               <SecTitle>🎲 Sorteio</SecTitle>
@@ -759,6 +1058,7 @@ export default function App(){
                       {editandoManual===dia.id?"✕ Fechar":"✏️ Manual"}
                     </button>
                   </div>
+
                   {editandoManual===dia.id&&(
                     <div style={{background:"rgba(0,0,0,0.3)",borderRadius:8,padding:12,marginBottom:10,border:`1px solid ${C.ouro}30`}}>
                       <div style={{fontSize:11,color:C.ouro,marginBottom:8}}>Defina manualmente — o restante será preenchido automaticamente:</div>
@@ -787,6 +1087,7 @@ export default function App(){
                       <button onClick={()=>{gerarSorteio();setEditandoManual(null);}} style={{...btnPri,marginTop:10,fontSize:12}}>🎲 Gerar com manual aplicado</button>
                     </div>
                   )}
+
                   <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))",gap:6}}>
                     {dia.funcs.map(({nome:fn,qtd})=>{
                       const pessoas=Object.entries(dia.alocados||{}).filter(([,f])=>f===fn).map(([n])=>n);
@@ -817,7 +1118,6 @@ export default function App(){
                     const substitutos=membros
                       .filter(m=>dispDia.includes(m.nome)&&!escaladosNoDia.has(m.nome))
                       .sort((a,b)=>{
-                        // prioridade: maior score, depois quem foi menos escalado no sorteio atual
                         const escA=sorteioAtual?.escAtual?.[a.nome]||0;
                         const escB=sorteioAtual?.escAtual?.[b.nome]||0;
                         if(escA!==escB) return escA-escB;
@@ -846,8 +1146,7 @@ export default function App(){
           </div>
         )}
 
-        {/* HISTÓRICO */}
-        {view===5&&(
+        {aba==="escalas"&&sub==="historico"&&(
           <div>
             <SecTitle>📋 Histórico de escalas</SecTitle>
             {!historico.length&&<div style={{textAlign:"center",color:`${C.ouro}50`,padding:36,fontSize:13}}>Nenhuma escala salva.</div>}
@@ -873,9 +1172,110 @@ export default function App(){
           </div>
         )}
 
+        {/* ═════════ REUNIÕES E EVENTOS ═════════ */}
+        {aba==="eventos"&&(
+          <div>
+            {!eventosOk&&(
+              <Card style={{marginBottom:12,border:"1px solid #ff884460"}}>
+                <SecTitle>⚠️ Tabelas de eventos não encontradas</SecTitle>
+                <div style={{fontSize:12,color:"#ffaa66"}}>Rode o SQL das tabelas <strong>eventos</strong> e <strong>presencas</strong> no Supabase e recarregue a página.</div>
+              </Card>
+            )}
+
+            <Card style={{marginBottom:12}}>
+              <SecTitle>➕ Novo evento / reunião</SecTitle>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:10,marginBottom:10}}>
+                <div>
+                  <label style={lbl}>Nome do evento</label>
+                  <input value={formEvento.nome} onChange={e=>setFormEvento(p=>({...p,nome:e.target.value}))} placeholder="Ex: Formação Prática" style={inp}/>
+                </div>
+                <div>
+                  <label style={lbl}>Data (opcional)</label>
+                  <input type="date" value={formEvento.data} onChange={e=>setFormEvento(p=>({...p,data:e.target.value}))} style={inp}/>
+                </div>
+                <div>
+                  <label style={lbl}>Descrição (opcional)</label>
+                  <input value={formEvento.descricao} onChange={e=>setFormEvento(p=>({...p,descricao:e.target.value}))} placeholder="Detalhes do evento" style={inp}/>
+                </div>
+              </div>
+              <button onClick={addEvento} disabled={salvando||!formEvento.nome.trim()} style={{...btnPri,opacity:(salvando||!formEvento.nome.trim())?.6:1}}>+ Adicionar evento</button>
+            </Card>
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",fontSize:11,color:C.ouroPale}}>
+                Clique na célula para alternar:
+                {Object.values(STATUS).map(s=><span key={s.label} style={{background:s.bg,color:s.fg,borderRadius:4,padding:"2px 8px",fontSize:10,fontWeight:700}}>{s.label}</span>)}
+              </div>
+              <input placeholder="🔍 Buscar membro…" value={buscaEvento} onChange={e=>setBuscaEvento(e.target.value)} style={{...inp,maxWidth:260}}/>
+            </div>
+
+            {!membros.length&&<div style={{textAlign:"center",color:`${C.ouro}50`,padding:36,fontSize:13}}>Cadastre os membros na aba CADASTRO para registrar presenças.</div>}
+
+            {membros.length>0&&(
+              <div style={{overflow:"auto",border:`1px solid ${C.ouro}40`,borderRadius:10,maxHeight:"70vh"}}>
+                <table style={{borderCollapse:"separate",borderSpacing:0,fontSize:12,minWidth:"100%"}}>
+                  <thead>
+                    <tr>
+                      <th style={{...thBase,position:"sticky",left:0,top:0,zIndex:4,minWidth:40,width:40}}>Nº</th>
+                      <th style={{...thBase,position:"sticky",left:40,top:0,zIndex:4,minWidth:220,textAlign:"left"}}>NOMES</th>
+                      <th style={{...thBase,position:"sticky",top:0,zIndex:2,minWidth:62,color:"#7bd88f"}}>PRES.</th>
+                      <th style={{...thBase,position:"sticky",top:0,zIndex:2,minWidth:62,color:"#ff8a8a"}}>FALTA</th>
+                      <th style={{...thBase,position:"sticky",top:0,zIndex:2,minWidth:62,color:"#f0d060"}}>JUST.</th>
+                      {eventos.map(ev=>(
+                        <th key={ev.id} style={{...thBase,position:"sticky",top:0,zIndex:2,minWidth:140,maxWidth:170}}>
+                          <div style={{fontWeight:700,color:C.ouroClaro,fontSize:12,whiteSpace:"normal"}}>{ev.nome}</div>
+                          {ev.data&&<div style={{color:C.ouroPale,fontSize:11,marginTop:2}}>{fmtDataCurta(ev.data)}</div>}
+                          {ev.descricao&&<div title={ev.descricao} style={{color:`${C.ouroPale}`,opacity:.75,fontSize:10,marginTop:2,whiteSpace:"normal",fontWeight:400,letterSpacing:0}}>{ev.descricao}</div>}
+                          <div style={{display:"flex",gap:4,justifyContent:"center",marginTop:6}}>
+                            <button onClick={()=>marcarTodosPresentes(ev)} title="Marcar PRESENÇA para quem está em branco" style={{background:STATUS.presenca.bg,color:STATUS.presenca.fg,border:"none",borderRadius:4,padding:"2px 6px",cursor:"pointer",fontSize:10,fontWeight:700,fontFamily:"inherit"}}>✓ todos</button>
+                            <button onClick={()=>removerEvento(ev)} title="Remover evento" style={{background:"rgba(150,0,0,0.7)",color:C.ouroPale,border:"none",borderRadius:4,padding:"2px 6px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}}>✕</button>
+                          </div>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {membrosEvento.map((m,i)=>{
+                      const s=statsMembros[m.id]||{pres:0,falta:0,just:0};
+                      const fundo=i%2===0?"#5c0000":"#500000";
+                      const cel={background:fundo,borderBottom:`1px solid ${C.ouro}18`,borderRight:`1px solid ${C.ouro}18`,padding:"5px 6px",color:C.brancoOff};
+                      return(
+                        <tr key={m.id}>
+                          <td style={{...cel,position:"sticky",left:0,zIndex:1,textAlign:"center",color:`${C.ouroPale}`,opacity:.8}}>{i+1}</td>
+                          <td style={{...cel,position:"sticky",left:40,zIndex:1,whiteSpace:"nowrap",fontWeight:600}}>{m.nome}</td>
+                          <td style={{...cel,textAlign:"center",color:"#7bd88f",fontWeight:700}}>{s.pres}</td>
+                          <td style={{...cel,textAlign:"center",color:"#ff8a8a",fontWeight:700}}>{s.falta}</td>
+                          <td style={{...cel,textAlign:"center",color:"#f0d060",fontWeight:700}}>{s.just}</td>
+                          {eventos.map(ev=>{
+                            const st=presMap[`${ev.id}|${m.id}`];
+                            const cfg=st?STATUS[st]:null;
+                            return(
+                              <td key={ev.id} style={{padding:0,borderBottom:`1px solid ${C.ouro}18`,borderRight:`1px solid ${C.ouro}18`,background:fundo}}>
+                                <button onClick={()=>definirStatus(ev.id,m.id,proximoStatus(st))} style={{display:"block",width:"100%",height:30,border:"none",cursor:"pointer",background:cfg?cfg.bg:"transparent",color:cfg?cfg.fg:`${C.ouro}50`,fontSize:11,fontWeight:700,fontFamily:"inherit"}}>
+                                  {cfg?cfg.label:"—"}
+                                </button>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {membros.length>0&&!eventos.length&&<div style={{textAlign:"center",color:`${C.ouro}60`,padding:20,fontSize:12}}>Nenhum evento ainda. Adicione o primeiro acima — ele aparece como uma nova coluna.</div>}
+          </div>
+        )}
+
       </div>
     </div>
   );
+}
+
+export default function App(){
+  const isMembro=window.location.search.includes("membro=1");
+  return isMembro ? <TelaMembro/> : <Painel/>;
 }
 
 const lbl={display:"block",fontSize:10,color:C.ouro,letterSpacing:1,marginBottom:4,textTransform:"uppercase"};
