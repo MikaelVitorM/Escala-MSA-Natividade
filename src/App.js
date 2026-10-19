@@ -623,7 +623,7 @@ function TelaMembro({onVoltar}){
 
 // ── PAINEL DO ORGANIZADOR ─────────────────────────────────────────────────────
 const ABAS=[["cadastro","CADASTRO"],["escalas","ESCALAS"],["eventos","REUNIÕES E EVENTOS"]];
-const SUBS=[["dias","📅 Dias"],["link","🔗 Link"],["estatisticas","📊 Estatísticas"],["sorteio","🎲 Sorteio"],["historico","📋 Histórico"],["externas","🌐 EXTERNAS"]];
+const SUBS=[["dias","📅 Dias"],["link","🔗 Link"],["estatisticas","📊 Estatísticas"],["sorteio","🎲 Sorteio"],["historico","📋 Histórico"],["externas","🌐 Externas"]];
 
 function Painel(){
   const [aba,setAba]=useState("escalas");
@@ -1134,7 +1134,7 @@ function Painel(){
   if(loading) return <div style={bgApp}><Spinner/></div>;
 
   const T=TEMAS[aba];
-  const thBase={background:"#3d0000",color:C.ouro,padding:"8px 6px",fontSize:11,letterSpacing:.5,borderBottom:`1px solid ${C.ouro}50`,borderRight:`1px solid ${C.ouro}20`,textAlign:"center",verticalAlign:"top"};
+  const thBase={background:"#33220e",color:C.ouro,padding:"8px 6px",fontSize:11,letterSpacing:.5,borderBottom:`1px solid ${C.ouro}50`,borderRight:`1px solid ${C.ouro}20`,textAlign:"center",verticalAlign:"top"};
   const P=PESOS_ESCORE;
 
   return(
@@ -1176,7 +1176,7 @@ function Painel(){
       )}
 
       <div style={{maxWidth:aba==="eventos"?1400:960,margin:"0 auto",padding:"16px 12px 48px"}}>
-        <div style={aba==="eventos"?{background:"rgba(35,0,0,0.94)",border:`1px solid ${C.ouro}60`,borderRadius:16,padding:16,boxShadow:"0 6px 24px rgba(0,0,0,0.35)"}:undefined}>
+        <div style={aba==="eventos"?{background:"linear-gradient(160deg,#573b1b 0%,#46301a 100%)",border:`1px solid ${C.ouro}60`,borderRadius:16,padding:16,boxShadow:"0 6px 24px rgba(0,0,0,0.35)"}:undefined}>
 
         {/* ═════════ CADASTRO ═════════ */}
         {aba==="cadastro"&&(
@@ -1903,7 +1903,7 @@ function Painel(){
                   <tbody>
                     {membrosEvento.map((m,i)=>{
                       const s=statsMembros[m.id]||{pres:0,falta:0,just:0};
-                      const fundo=i%2===0?"#5c0000":"#500000";
+                      const fundo=i%2===0?"#614322":"#563b1e";
                       const cel={background:fundo,borderBottom:`1px solid ${C.ouro}18`,borderRight:`1px solid ${C.ouro}18`,padding:"5px 6px",color:C.brancoOff};
                       return(
                         <tr key={m.id}>
