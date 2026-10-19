@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, createContext, useContext } from "react";
 import * as XLSX from "xlsx";
 
 const SUPABASE_URL = "https://sdhxphydfowlftoiwjwt.supabase.co";
@@ -115,6 +115,29 @@ const C = {
   ouroPale:"#F5E6C0", branco:"#FFFFFF", brancoOff:"#FAF5EC",
 };
 const bgApp = { minHeight:"100vh", background:"linear-gradient(160deg,#6B0000 0%,#8B0000 40%,#5A0000 100%)", fontFamily:"Georgia,serif", color:C.brancoOff };
+
+// ── temas por aba: Cadastro = preto, Escalas = vermelho, Reuniões e Eventos = dourado ──
+const TEMAS = {
+  cadastro: {
+    fundo: "linear-gradient(160deg,#141414 0%,#000000 55%,#0a0a0a 100%)",
+    titulo: "#FFFFFF", subtitulo: "#C9A84C", linha: "#C9A84C",
+    abaAtiva: "#E8C96D", abaInativa: "#8d7f55", abaBorda: "#E8C96D",
+    card: "rgba(255,255,255,0.05)",
+  },
+  escalas: {
+    fundo: "linear-gradient(160deg,#6B0000 0%,#8B0000 40%,#5A0000 100%)",
+    titulo: "#FFFFFF", subtitulo: "#C9A84C", linha: "#C9A84C",
+    abaAtiva: "#FFFFFF", abaInativa: "#e0b9a0", abaBorda: "#C9A84C",
+    card: "rgba(0,0,0,0.25)",
+  },
+  eventos: {
+    fundo: "linear-gradient(160deg,#E6C463 0%,#C9A84C 45%,#B08F34 100%)",
+    titulo: "#2b0000", subtitulo: "#5a0000", linha: "#5a0000",
+    abaAtiva: "#2b0000", abaInativa: "#7a5a10", abaBorda: "#2b0000",
+    card: "rgba(0,0,0,0.25)",
+  },
+};
+const TemaCtx = createContext("escalas");
 
 // ── funções necessárias por missa ─────────────────────────────────────────────
 function getFuncoesNecessarias(dia) {
@@ -400,7 +423,10 @@ function Tag({label,onRemove,color}){
     {label}{onRemove&&<button onClick={onRemove} style={{background:"none",border:"none",cursor:"pointer",color:c,fontSize:14,lineHeight:1,padding:0}}>×</button>}
   </span>;
 }
-function Card({children,style={}}){ return <div style={{background:"rgba(0,0,0,0.25)",border:`1px solid ${C.ouro}35`,borderRadius:12,padding:18,...style}}>{children}</div>; }
+function Card({children,style={}}){
+  const tema=useContext(TemaCtx);
+  return <div style={{background:TEMAS[tema].card,border:`1px solid ${C.ouro}35`,borderRadius:12,padding:18,...style}}>{children}</div>;
+}
 function SecTitle({children}){ return <div style={{fontSize:11,color:C.ouro,letterSpacing:2,textTransform:"uppercase",marginBottom:12}}>{children}</div>; }
 function Spinner(){ return <div style={{textAlign:"center",padding:60,color:C.ouro,fontSize:14}}>⏳ Carregando…</div>; }
 function Mini({label,valor,cor}){
@@ -427,10 +453,11 @@ function BotoesStatus({valor,onChange}){
 }
 
 // formulário de cadastro / edição de membro
-function FormMembro({inicial,onSalvar,onCancelar,salvando}){
+function FormMembro({inicial,onSalvar,onCancelar,salvando,obsAtiva}){
   const [nome,setNome]=useState(inicial?.nome||"");
   const [score,setScore]=useState(inicial&&inicial.scoreManual?String(inicial.score):"");
   const [funcoes,setFuncoes]=useState(inicial?.funcoes||[]);
+  const [obs,setObs]=useState(inicial?.observacoes||"");
   const sug=inicial?.scoreSugerido??0;
   const tem=f=>funcoes.some(x=>norm(x)===norm(f));
   const toggle=f=>setFuncoes(p=>tem(f)?p.filter(x=>norm(x)!==norm(f)):[...p,f]);
@@ -438,7 +465,7 @@ function FormMembro({inicial,onSalvar,onCancelar,salvando}){
     if(!nome.trim()) return;
     const txt=String(score).trim().replace(",",".");
     const n=txt===""?null:parseFloat(txt);
-    onSalvar({nome:nome.trim(),funcoes,score:(n===null||Number.isNaN(n))?null:n});
+    onSalvar({nome:nome.trim(),funcoes,score:(n===null||Number.isNaN(n))?null:n,observacoes:obs.trim()});
   };
   return(
     <div style={{background:"rgba(0,0,0,0.35)",border:`1px solid ${C.ouro}60`,borderRadius:12,padding:16}}>
@@ -462,6 +489,12 @@ function FormMembro({inicial,onSalvar,onCancelar,salvando}){
             <input type="checkbox" checked={tem(f)} onChange={()=>toggle(f)} style={{accentColor:C.ouro}}/>{f}
           </label>
         ))}
+      </div>
+      <div style={{marginBottom:12}}>
+        <label style={lbl}>Observações (opcional)</label>
+        <textarea value={obs} onChange={e=>setObs(e.target.value)} disabled={!obsAtiva} rows={3}
+          placeholder={obsAtiva?"Anotações sobre o membro…":"Rode o SQL das observações no Supabase para ativar este campo"}
+          style={{...inp,resize:"vertical",fontFamily:"Georgia,serif",opacity:obsAtiva?1:.6}}/>
       </div>
       <div style={{display:"flex",gap:8}}>
         <button onClick={salvar} disabled={salvando||!nome.trim()} style={{...btnPri,opacity:(salvando||!nome.trim())?.6:1}}>{salvando?"⏳ Salvando…":"💾 Salvar"}</button>
@@ -527,10 +560,10 @@ function TelaMembro({onVoltar}){
   if(!nome) return(
     <div style={{...bgApp,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}>
       <div style={{textAlign:"center",marginBottom:20}}>
-        <img src={BRASAO} alt="Brasão MSA" style={{width:80,height:80,objectFit:"contain",marginBottom:8,filter:"drop-shadow(0 2px 8px rgba(201,168,76,0.4))"}}/>
-        <h1 style={{color:C.branco,fontWeight:400,fontSize:20,margin:"4px 0",letterSpacing:3}}>Escala Litúrgica</h1>
-        <div style={{fontSize:11,color:C.ouro,letterSpacing:2}}>MSA NATIVIDADE</div>
-        <div style={{width:70,height:1,background:`linear-gradient(90deg,transparent,${C.ouro},transparent)`,margin:"8px auto"}}/>
+        <img src={BRASAO} alt="Brasão" style={{width:80,height:80,objectFit:"contain",marginBottom:8,filter:"drop-shadow(0 2px 8px rgba(201,168,76,0.4))"}}/>
+        <h1 style={{color:C.branco,fontWeight:400,fontStyle:"italic",fontSize:32,margin:"4px 0 0",letterSpacing:8,paddingLeft:8}}>ALTARE</h1>
+        <div style={{fontSize:10,color:C.ouro,letterSpacing:4,textTransform:"uppercase",marginTop:2}}>Software Administrativo</div>
+        <div style={{width:70,height:1,background:`linear-gradient(90deg,transparent,${C.ouro},transparent)`,margin:"10px auto"}}/>
         <p style={{color:C.ouroPale,fontSize:13,margin:0}}>Selecione seu nome</p>
       </div>
       <div style={{width:"100%",maxWidth:420,background:"rgba(0,0,0,0.3)",border:`1px solid ${C.ouro}40`,borderRadius:16,padding:18}}>
@@ -589,8 +622,8 @@ function TelaMembro({onVoltar}){
 }
 
 // ── PAINEL DO ORGANIZADOR ─────────────────────────────────────────────────────
-const ABAS=[["cadastro","👥 CADASTRO"],["escalas","📋 ESCALAS"],["eventos","📅 REUNIÕES E EVENTOS"]];
-const SUBS=[["dias","📅 Dias"],["link","🔗 Link"],["estatisticas","📊 Estatísticas"],["sorteio","🎲 Sorteio"],["historico","📋 Histórico"]];
+const ABAS=[["cadastro","CADASTRO"],["escalas","ESCALAS"],["eventos","REUNIÕES E EVENTOS"]];
+const SUBS=[["dias","📅 Dias"],["link","🔗 Link"],["estatisticas","📊 Estatísticas"],["sorteio","🎲 Sorteio"],["historico","📋 Histórico"],["externas","🌐 EXTERNAS"]];
 
 function Painel(){
   const [aba,setAba]=useState("escalas");
@@ -606,6 +639,15 @@ function Painel(){
   const [eventos,setEventos]=useState([]);
   const [presMap,setPresMap]=useState({});
   const [eventosOk,setEventosOk]=useState(true);
+
+  const [externos,setExternos]=useState([]);
+  const [extPart,setExtPart]=useState({});
+  const [externosOk,setExternosOk]=useState(true);
+  const [formExterno,setFormExterno]=useState({nome:"",descricao:"",data:""});
+  const [pickerId,setPickerId]=useState(null);
+  const [pickerSel,setPickerSel]=useState([]);
+  const [pickerBusca,setPickerBusca]=useState("");
+  const [mostrarSemExt,setMostrarSemExt]=useState(false);
 
   const [sorteioAtual,setSorteioAtual]=useState(null);
   const [manualSlots,setManualSlots]=useState({});
@@ -685,6 +727,18 @@ function Painel(){
         setPresMap(mapa);
         setEventosOk(true);
       }catch(e){console.error(e);setEventosOk(false);}
+      try{
+        const [exs,eps]=await Promise.all([
+          dbGet("externos","select=*&order=criado_em"),
+          dbGetAll("externos_membros","select=externo_id,membro_id&order=id"),
+        ]);
+        setExternos(ordenarEventos(exs));
+        const mp={};
+        exs.forEach(x=>{mp[x.id]=[];});
+        eps.forEach(p=>{if(mp[p.externo_id])mp[p.externo_id].push(p.membro_id);});
+        setExtPart(mp);
+        setExternosOk(true);
+      }catch(e){console.error(e);setExternosOk(false);}
     }
     setLoading(false);
   };
@@ -708,7 +762,15 @@ function Painel(){
 
   const dispStats=useMemo(()=>calcDispStats(membros,historico,dias,disponibilidades,dispUltima),[membros,historico,dias,disponibilidades,dispUltima]);
 
+  // quantidade de eventos externos por membro
+  const extCont=useMemo(()=>{
+    const c={};
+    Object.values(extPart).forEach(arr=>arr.forEach(id=>{c[id]=(c[id]||0)+1;}));
+    return c;
+  },[extPart]);
+
   const colScoreOk=membros.length===0||membros[0].score_editado!==undefined;
+  const colObsOk=membros.length===0||membros[0].observacoes!==undefined;
 
   // ── dias da escala ──
   const addDia=async()=>{
@@ -745,6 +807,12 @@ function Painel(){
       payload.score=dados.score;
       if(colScoreOk) payload.score_editado=true;
     }
+    if(colObsOk){
+      payload.observacoes=dados.observacoes||null;
+    } else if(dados.observacoes){
+      alert("Para salvar observações, rode o SQL das observações no Supabase e recarregue a página.");
+      return;
+    }
     setSalvando(true);
     try{
       if(id){
@@ -775,12 +843,13 @@ function Painel(){
   };
 
   const removerMembro=async(m)=>{
-    if(!window.confirm(`Remover ${m.nome}? As disponibilidades e presenças dessa pessoa também serão apagadas.`))return;
+    if(!window.confirm(`Remover ${m.nome}? As disponibilidades, presenças e participações em eventos externos dessa pessoa também serão apagadas.`))return;
     try{
       await dbDelete("membros",`id=eq.${m.id}`);
       setMembros(p=>p.filter(x=>x.id!==m.id));
       setDisponibilidades(p=>{const n={};Object.entries(p).forEach(([k,v])=>{n[k]=v.filter(x=>x!==m.nome);});return n;});
       setPresMap(p=>{const n={};Object.entries(p).forEach(([k,v])=>{if(k.split("|")[1]!==m.id)n[k]=v;});return n;});
+      setExtPart(p=>{const n={};Object.entries(p).forEach(([k,v])=>{n[k]=v.filter(id=>id!==m.id);});return n;});
     }catch(e){alert("Erro ao remover: "+e.message);}
   };
 
@@ -907,6 +976,59 @@ function Painel(){
     }
   };
 
+  // ── eventos externos ──
+  const addExterno=async()=>{
+    if(!formExterno.nome.trim())return;
+    setSalvando(true);
+    try{
+      const [novo]=await dbInsert("externos",[{nome:formExterno.nome.trim(),descricao:formExterno.descricao.trim()||null,data:formExterno.data||null}]);
+      setExternos(p=>ordenarEventos([...p,novo]));
+      setExtPart(p=>({...p,[novo.id]:[]}));
+      setFormExterno({nome:"",descricao:"",data:""});
+    }catch(e){alert("Erro ao salvar evento externo: "+e.message);}
+    setSalvando(false);
+  };
+
+  const removerExterno=async(ex)=>{
+    if(!window.confirm(`Remover o evento externo "${ex.nome}" e a lista de participantes?`))return;
+    try{
+      await dbDelete("externos",`id=eq.${ex.id}`);
+      setExternos(p=>p.filter(x=>x.id!==ex.id));
+      setExtPart(p=>{const n={...p};delete n[ex.id];return n;});
+      if(pickerId===ex.id) setPickerId(null);
+    }catch(e){alert("Erro ao remover: "+e.message);}
+  };
+
+  const adicionarParticipantes=async(ex)=>{
+    const jaTem=extPart[ex.id]||[];
+    const novos=pickerSel.filter(id=>!jaTem.includes(id));
+    setPickerId(null);setPickerSel([]);setPickerBusca("");
+    if(!novos.length) return;
+    const antes=extPart;
+    setExtPart(p=>({...p,[ex.id]:[...(p[ex.id]||[]),...novos]}));
+    try{
+      await sbFetch("externos_membros?on_conflict=externo_id,membro_id",{
+        method:"POST",
+        headers:{Prefer:"resolution=merge-duplicates,return=representation"},
+        body:JSON.stringify(novos.map(id=>({externo_id:ex.id,membro_id:id}))),
+      });
+    }catch(e){
+      setExtPart(antes);
+      alert("Erro ao adicionar participantes: "+e.message);
+    }
+  };
+
+  const removerParticipante=async(ex,membroId)=>{
+    const antes=extPart;
+    setExtPart(p=>({...p,[ex.id]:(p[ex.id]||[]).filter(id=>id!==membroId)}));
+    try{
+      await dbDelete("externos_membros",`externo_id=eq.${ex.id}&membro_id=eq.${membroId}`);
+    }catch(e){
+      setExtPart(antes);
+      alert("Erro ao remover participante: "+e.message);
+    }
+  };
+
   // ── presença e trocas nas escalas salvas (gravadas dentro do próprio histórico) ──
   const salvarResultadoHistorico=(id,resultado,anterior)=>{
     setHistorico(p=>p.map(x=>x.id===id?{...x,resultado}:x));
@@ -1003,6 +1125,7 @@ function Painel(){
     if(ordemCadastro==="escore") return (b.score-a.score)||a.nome.localeCompare(b.nome);
     if(ordemCadastro==="parado") return (chaveParado(a)-chaveParado(b))||a.nome.localeCompare(b.nome);
     if(ordemCadastro==="trocas") return ((statsMembros[b.id]?.trocas||0)-(statsMembros[a.id]?.trocas||0))||a.nome.localeCompare(b.nome);
+    if(ordemCadastro==="externos") return ((extCont[a.id]||0)-(extCont[b.id]||0))||a.nome.localeCompare(b.nome);
     return a.nome.localeCompare(b.nome);
   });
   const membrosEvento=[...membros].filter(m=>norm(m.nome).includes(norm(buscaEvento))).sort((a,b)=>a.nome.localeCompare(b.nome));
@@ -1010,25 +1133,37 @@ function Painel(){
   if(simMembro) return <TelaMembro onVoltar={()=>setSimMembro(false)}/>;
   if(loading) return <div style={bgApp}><Spinner/></div>;
 
+  const T=TEMAS[aba];
   const thBase={background:"#3d0000",color:C.ouro,padding:"8px 6px",fontSize:11,letterSpacing:.5,borderBottom:`1px solid ${C.ouro}50`,borderRight:`1px solid ${C.ouro}20`,textAlign:"center",verticalAlign:"top"};
   const P=PESOS_ESCORE;
 
   return(
-    <div style={bgApp}>
+    <TemaCtx.Provider value={aba}>
+    <div style={{...bgApp,background:T.fundo}}>
       {/* HEADER */}
-      <div style={{textAlign:"center",padding:"20px 24px 12px",borderBottom:`1px solid ${C.ouro}40`,background:"rgba(0,0,0,0.25)"}}>
-        <img src={BRASAO} alt="Brasão MSA Natividade" style={{width:90,height:90,objectFit:"contain",marginBottom:8,filter:"drop-shadow(0 2px 8px rgba(201,168,76,0.4))"}}/>
-        <div style={{fontSize:9,letterSpacing:6,color:C.ouro,textTransform:"uppercase",marginBottom:3}}>Painel do Organizador</div>
-        <h1 style={{margin:0,fontSize:"clamp(16px,4vw,26px)",fontWeight:400,color:C.branco,letterSpacing:3}}>Escala Litúrgica</h1>
-        <div style={{fontSize:10,color:C.ouro,letterSpacing:3,marginTop:2}}>MSA NATIVIDADE</div>
-        <div style={{width:80,height:1,background:`linear-gradient(90deg,transparent,${C.ouro},transparent)`,margin:"8px auto 0"}}/>
+      <div style={{textAlign:"center",padding:"22px 24px 8px"}}>
+        <img src={BRASAO} alt="Brasão" style={{width:96,height:96,objectFit:"contain",marginBottom:6,filter:"drop-shadow(0 2px 8px rgba(0,0,0,0.35))"}}/>
+        <h1 style={{margin:"4px 0 0",fontSize:"clamp(30px,7vw,50px)",fontWeight:400,fontStyle:"italic",letterSpacing:10,paddingLeft:10,color:T.titulo,fontFamily:"Georgia,serif"}}>ALTARE</h1>
+        <div style={{fontSize:11,letterSpacing:5,textTransform:"uppercase",color:T.subtitulo,marginTop:2}}>Software Administrativo</div>
+        <div style={{width:110,height:1,background:`linear-gradient(90deg,transparent,${T.linha},transparent)`,margin:"12px auto 0"}}/>
       </div>
 
       {/* ABAS PRINCIPAIS */}
-      <div style={{display:"flex",justifyContent:"center",flexWrap:"wrap",gap:6,padding:"14px 10px 0"}}>
-        {ABAS.map(([k,t])=>(
-          <button key={k} onClick={()=>setAba(k)} style={{padding:"10px 20px",border:`1px solid ${aba===k?C.ouro:C.ouro+"50"}`,borderRadius:9,cursor:"pointer",fontFamily:"inherit",fontSize:13,letterSpacing:1,background:aba===k?`linear-gradient(135deg,${C.ouro},#A07828)`:"rgba(0,0,0,0.25)",color:aba===k?C.vermelho:C.ouroPale,fontWeight:aba===k?"700":"400"}}>{t}</button>
-        ))}
+      <div style={{display:"flex",justifyContent:"center",alignItems:"flex-end",flexWrap:"wrap",gap:"2px 38px",padding:"8px 10px 0",borderBottom:`1px solid ${T.linha}55`}}>
+        {ABAS.map(([k,t])=>{
+          const ativo=aba===k;
+          return(
+            <button key={k} onClick={()=>setAba(k)} style={{
+              background:"none",border:"none",borderBottom:`4px solid ${ativo?T.abaBorda:"transparent"}`,
+              padding:"8px 6px 10px",cursor:"pointer",fontFamily:"Georgia,serif",textTransform:"uppercase",
+              letterSpacing:ativo?3:2,fontWeight:ativo?700:400,
+              fontSize:ativo?"clamp(18px,4.6vw,28px)":"clamp(12px,3vw,16px)",
+              color:ativo?T.abaAtiva:T.abaInativa,
+              textShadow:ativo&&k!=="eventos"?"0 0 14px rgba(232,201,109,0.45)":"none",
+              transition:"all .2s",
+            }}>{t}</button>
+          );
+        })}
       </div>
 
       {/* SUB-ABAS DE ESCALAS */}
@@ -1041,6 +1176,7 @@ function Painel(){
       )}
 
       <div style={{maxWidth:aba==="eventos"?1400:960,margin:"0 auto",padding:"16px 12px 48px"}}>
+        <div style={aba==="eventos"?{background:"rgba(35,0,0,0.94)",border:`1px solid ${C.ouro}60`,borderRadius:16,padding:16,boxShadow:"0 6px 24px rgba(0,0,0,0.35)"}:undefined}>
 
         {/* ═════════ CADASTRO ═════════ */}
         {aba==="cadastro"&&(
@@ -1049,6 +1185,12 @@ function Painel(){
               <Card style={{marginBottom:12,border:"1px solid #ff884460"}}>
                 <SecTitle>⚠️ Escore sugerido ainda não ativado</SecTitle>
                 <div style={{fontSize:12,color:"#ffaa66"}}>Rode o SQL do escore (coluna <strong>score_editado</strong>) no Supabase e recarregue a página para ativar o escore sugerido.</div>
+              </Card>
+            )}
+            {!colObsOk&&(
+              <Card style={{marginBottom:12,border:"1px solid #ff884460"}}>
+                <SecTitle>⚠️ Observações ainda não ativadas</SecTitle>
+                <div style={{fontSize:12,color:"#ffaa66"}}>Rode o SQL da coluna <strong>observacoes</strong> em membros no Supabase e recarregue a página para usar o campo de observações.</div>
               </Card>
             )}
             {!dispDataOk&&(
@@ -1084,7 +1226,7 @@ function Painel(){
 
             {editandoId==="novo"&&(
               <div style={{marginBottom:12}}>
-                <FormMembro onSalvar={d=>salvarMembro(d,null)} onCancelar={()=>setEditandoId(null)} salvando={salvando}/>
+                <FormMembro onSalvar={d=>salvarMembro(d,null)} onCancelar={()=>setEditandoId(null)} salvando={salvando} obsAtiva={colObsOk}/>
               </div>
             )}
 
@@ -1096,6 +1238,7 @@ function Painel(){
                   <option value="escore">Ordenar: Maior escore</option>
                   <option value="parado">Ordenar: Mais tempo sem se disponibilizar</option>
                   <option value="trocas">Ordenar: Mais trocas solicitadas</option>
+                  <option value="externos">Ordenar: Menos eventos externos</option>
                 </select>
                 <input placeholder="🔍 Buscar membro…" value={buscaMembro} onChange={e=>setBuscaMembro(e.target.value)} style={{...inp,maxWidth:230}}/>
                 {colScoreOk&&membros.length>0&&<button onClick={usarSugeridoTodos} style={{...btnSec,fontSize:11,padding:"8px 12px"}} title="Remove os escores manuais de todos">↺ Usar escore sugerido em todos</button>}
@@ -1108,7 +1251,7 @@ function Painel(){
               {membrosCadastro.map(m=>{
                 if(editandoId===m.id) return(
                   <div key={m.id} style={{gridColumn:"1 / -1"}}>
-                    <FormMembro inicial={m} onSalvar={d=>salvarMembro(d,m.id)} onCancelar={()=>setEditandoId(null)} salvando={salvando}/>
+                    <FormMembro inicial={m} onSalvar={d=>salvarMembro(d,m.id)} onCancelar={()=>setEditandoId(null)} salvando={salvando} obsAtiva={colObsOk}/>
                   </div>
                 );
                 const s=statsMembros[m.id]||{pres:0,falta:0,just:0,ePres:0,eFalta:0,eJust:0,trocas:0,escalado:0,fnTop:null};
@@ -1158,9 +1301,15 @@ function Painel(){
                       🎲 Escalado <strong style={{color:C.ouroClaro}}>{s.escalado}</strong> vez(es)<br/>
                       ⭐ Função que mais desempenha: <strong style={{color:C.ouroClaro}}>{s.fnTop?`${s.fnTop.nome} (${s.fnTop.qtd}x)`:"—"}</strong><br/>
                       🔄 Trocas solicitadas: <strong style={{color:C.ouroClaro}}>{s.trocas}</strong><br/>
+                      🌐 Eventos externos: <strong style={{color:C.ouroClaro}}>{extCont[m.id]||0}</strong><br/>
                       📝 Disponível em <strong style={{color:C.ouroClaro}}>{dd.escalasDisp}</strong> de <strong style={{color:C.ouroClaro}}>{dd.total}</strong> escala(s)<br/>
                       🕒 Último formulário: <strong style={{color:ultCor}}>{ultTxt}</strong>
                     </div>
+                    {m.observacoes&&(
+                      <div style={{marginTop:7,fontSize:11,color:C.ouroPale,background:"rgba(0,0,0,0.3)",borderLeft:`3px solid ${C.ouro}`,borderRadius:4,padding:"5px 8px",whiteSpace:"pre-wrap"}}>
+                        <strong style={{color:C.ouro}}>📌 Observações:</strong> {m.observacoes}
+                      </div>
+                    )}
                     <div style={{display:"flex",gap:6,marginTop:9}}>
                       <button onClick={()=>setEditandoId(m.id)} style={{...btnSec,fontSize:11,padding:"5px 12px"}}>✏️ Editar</button>
                       <button onClick={()=>removerMembro(m)} style={{background:"rgba(150,0,0,0.6)",border:`1px solid ${C.ouro}40`,color:C.ouroPale,borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>🗑 Remover</button>
@@ -1575,6 +1724,120 @@ function Painel(){
           </div>
         )}
 
+        {/* ═════════ EXTERNAS ═════════ */}
+        {aba==="escalas"&&sub==="externas"&&(
+          <div>
+            {!externosOk&&(
+              <Card style={{marginBottom:12,border:"1px solid #ff884460"}}>
+                <SecTitle>⚠️ Tabelas de eventos externos não encontradas</SecTitle>
+                <div style={{fontSize:12,color:"#ffaa66"}}>Rode o SQL das tabelas <strong>externos</strong> e <strong>externos_membros</strong> no Supabase e recarregue a página.</div>
+              </Card>
+            )}
+
+            <Card style={{marginBottom:12}}>
+              <SecTitle>➕ Novo evento externo</SecTitle>
+              <p style={{color:C.ouroPale,fontSize:11,margin:"0 0 10px",opacity:.85}}>Registre eventos fora da paróquia e quem participou, sem limite de participantes. Serve para saber quem já teve a oportunidade e quem ainda não.</p>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:10,marginBottom:10}}>
+                <div>
+                  <label style={lbl}>Nome do evento externo</label>
+                  <input value={formExterno.nome} onChange={e=>setFormExterno(p=>({...p,nome:e.target.value}))} placeholder="Ex: Encontro Diocesano" style={inp}/>
+                </div>
+                <div>
+                  <label style={lbl}>Data (opcional)</label>
+                  <input type="date" value={formExterno.data} onChange={e=>setFormExterno(p=>({...p,data:e.target.value}))} style={inp}/>
+                </div>
+                <div>
+                  <label style={lbl}>Descrição (opcional)</label>
+                  <input value={formExterno.descricao} onChange={e=>setFormExterno(p=>({...p,descricao:e.target.value}))} placeholder="Detalhes do evento" style={inp}/>
+                </div>
+              </div>
+              <button onClick={addExterno} disabled={salvando||!formExterno.nome.trim()} style={{...btnPri,opacity:(salvando||!formExterno.nome.trim())?.6:1}}>+ Adicionar evento externo</button>
+            </Card>
+
+            {membros.length>0&&(()=>{
+              const semExt=membros.filter(m=>!extCont[m.id]).sort((a,b)=>a.nome.localeCompare(b.nome));
+              return(
+                <Card style={{marginBottom:12,padding:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                    <div style={{fontSize:12,color:C.ouroPale}}>
+                      🌐 <strong style={{color:C.ouroClaro}}>{membros.length-semExt.length}</strong> de {membros.length} membros já participaram de eventos externos · <strong style={{color:"#7bd88f"}}>{semExt.length}</strong> ainda sem oportunidade
+                    </div>
+                    {semExt.length>0&&<button onClick={()=>setMostrarSemExt(!mostrarSemExt)} style={{...btnSec,fontSize:11,padding:"4px 10px"}}>{mostrarSemExt?"ocultar":"ver quem"}</button>}
+                  </div>
+                  {mostrarSemExt&&(
+                    <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:10}}>
+                      {semExt.map(m=><Tag key={m.id} label={m.nome.split(" ").slice(0,2).join(" ")} color="#7bd88f"/>)}
+                    </div>
+                  )}
+                </Card>
+              );
+            })()}
+
+            {!externos.length&&<div style={{textAlign:"center",color:`${C.ouro}50`,padding:36,fontSize:13}}>Nenhum evento externo cadastrado.</div>}
+
+            {externos.map(ex=>{
+              const ids=extPart[ex.id]||[];
+              const participantes=ids.map(id=>membros.find(m=>m.id===id)).filter(Boolean).sort((a,b)=>a.nome.localeCompare(b.nome));
+              const aberto=pickerId===ex.id;
+              const candidatos=aberto
+                ?membros.filter(m=>!ids.includes(m.id)&&norm(m.nome).includes(norm(pickerBusca))).sort((a,b)=>((extCont[a.id]||0)-(extCont[b.id]||0))||a.nome.localeCompare(b.nome))
+                :[];
+              return(
+                <Card key={ex.id} style={{marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,flexWrap:"wrap",marginBottom:8}}>
+                    <div style={{flex:"1 1 220px"}}>
+                      <div style={{color:C.branco,fontWeight:700,fontSize:15}}>{ex.nome}</div>
+                      <div style={{color:C.ouroPale,fontSize:11,marginTop:2}}>
+                        {ex.data?`📅 ${fmtDataCurta(ex.data)} · `:""}<strong style={{color:C.ouroClaro}}>{participantes.length}</strong> participante(s)
+                      </div>
+                      {ex.descricao&&<div style={{color:C.ouroPale,opacity:.85,fontSize:12,marginTop:4,whiteSpace:"pre-wrap"}}>{ex.descricao}</div>}
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>{setPickerId(aberto?null:ex.id);setPickerSel([]);setPickerBusca("");}} style={{...btnPri,fontSize:12,padding:"6px 12px"}}>{aberto?"✕ Fechar":"➕ Adicionar membros"}</button>
+                      <button onClick={()=>removerExterno(ex)} title="Remover evento externo" style={{background:"rgba(150,0,0,0.6)",border:`1px solid ${C.ouro}40`,color:C.ouroPale,borderRadius:7,padding:"6px 10px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>🗑</button>
+                    </div>
+                  </div>
+
+                  {participantes.length===0
+                    ?<div style={{fontSize:11,color:`${C.ouro}70`}}>Nenhum participante adicionado ainda.</div>
+                    :<div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                      {participantes.map(m=><Tag key={m.id} label={m.nome.split(" ").slice(0,2).join(" ")} onRemove={()=>removerParticipante(ex,m.id)}/>)}
+                    </div>}
+
+                  {aberto&&(
+                    <div style={{marginTop:10,background:"rgba(0,0,0,0.3)",border:`1px solid ${C.ouro}40`,borderRadius:10,padding:12}}>
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:8}}>
+                        <input placeholder="🔍 Buscar membro…" value={pickerBusca} onChange={e=>setPickerBusca(e.target.value)} style={{...inp,maxWidth:240}}/>
+                        <button onClick={()=>setPickerSel(candidatos.map(m=>m.id))} style={{...btnSec,fontSize:11,padding:"6px 10px"}}>Selecionar todos da lista</button>
+                        <button onClick={()=>setPickerSel([])} style={{...btnSec,fontSize:11,padding:"6px 10px"}}>Limpar</button>
+                      </div>
+                      <div style={{fontSize:10,color:`${C.ouro}90`,marginBottom:6}}>Quem tem menos eventos externos aparece primeiro.</div>
+                      <div style={{maxHeight:260,overflowY:"auto",display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:4}}>
+                        {candidatos.map(m=>{
+                          const sel=pickerSel.includes(m.id);
+                          const n=extCont[m.id]||0;
+                          return(
+                            <label key={m.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12,color:sel?C.ouroClaro:C.ouroPale,background:sel?`${C.ouro}20`:"rgba(0,0,0,0.2)",border:`1px solid ${sel?C.ouro:C.ouro+"25"}`,borderRadius:6,padding:"6px 8px"}}>
+                              <input type="checkbox" checked={sel} onChange={()=>setPickerSel(p=>sel?p.filter(x=>x!==m.id):[...p,m.id])} style={{accentColor:C.ouro}}/>
+                              <span style={{flex:1}}>{m.nome}</span>
+                              <span style={{fontSize:10,color:n===0?"#7bd88f":C.ouro,whiteSpace:"nowrap"}}>{n===0?"nunca participou":`${n} externo(s)`}</span>
+                            </label>
+                          );
+                        })}
+                        {!candidatos.length&&<div style={{fontSize:12,color:`${C.ouro}70`,padding:8}}>Nenhum membro encontrado.</div>}
+                      </div>
+                      <div style={{display:"flex",gap:8,marginTop:10}}>
+                        <button onClick={()=>adicionarParticipantes(ex)} disabled={!pickerSel.length} style={{...btnPri,opacity:pickerSel.length?1:.5}}>Adicionar ({pickerSel.length})</button>
+                        <button onClick={()=>{setPickerId(null);setPickerSel([]);setPickerBusca("");}} style={btnSec}>Cancelar</button>
+                      </div>
+                    </div>
+                  )}
+                </Card>
+              );
+            })}
+          </div>
+        )}
+
         {/* ═════════ REUNIÕES E EVENTOS ═════════ */}
         {aba==="eventos"&&(
           <div>
@@ -1671,8 +1934,10 @@ function Painel(){
           </div>
         )}
 
+        </div>
       </div>
     </div>
+    </TemaCtx.Provider>
   );
 }
 
