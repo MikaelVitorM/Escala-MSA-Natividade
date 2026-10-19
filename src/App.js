@@ -78,6 +78,13 @@ const HIERARQUIA_SCORE = [
 ];
 const DIA_VAZIO = { data:"", horario:"", horarioCustom:"", usarCustom:false, igreja:"", temIncenso:false, temBispo:false, solenidade:false, nomeSolenidade:"" };
 
+// ── pesos do ESCORE SUGERIDO (altere aqui se quiser mudar o cálculo) ──────────
+// o maior peso é a presença em escalas; o menor é a presença em reuniões
+const PESOS_ESCORE = {
+  escala:  { presenca: 3, falta: -3, justificada: 0 },
+  reuniao: { presenca: 1, falta: -1, justificada: 0 },
+};
+
 const STATUS = {
   presenca:    { label:"PRESENÇA",    bg:"#c6efce", fg:"#006100" },
   falta:       { label:"FALTA",       bg:"#ffc7ce", fg:"#9c0006" },
@@ -89,6 +96,12 @@ const norm = s => s ? s.normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerC
 const isDomingo = d => d ? new Date(d+"T12:00:00").getDay()===0 : false;
 const fmtData   = d => d ? new Date(d+"T12:00:00").toLocaleDateString("pt-BR",{weekday:"long",day:"2-digit",month:"long"}) : "";
 const fmtDataCurta = d => d ? new Date(d+"T12:00:00").toLocaleDateString("pt-BR") : "";
+const fmtISO = iso => iso ? new Date(iso).toLocaleDateString("pt-BR") : "";
+const diasDesde = iso => {
+  const t = new Date(iso).getTime();
+  if (!t) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / 86400000));
+};
 
 const ordenarEventos = arr => [...arr].sort((a,b)=>{
   if (a.data && b.data && a.data!==b.data) return a.data<b.data ? -1 : 1;
@@ -264,12 +277,12 @@ function calcPos({resultado,pendentes},membros,disponibilidades){
   return{escaladoPor,dispPor,media:count>0?(total/count).toFixed(1):0,pendentes};
 }
 
-// estatísticas de cada membro: presenças em eventos + presenças nas escalas salvas
+// estatísticas de cada membro: presenças em eventos, presenças nas escalas salvas e trocas
 function calcStatsMembros(membros, historico, presMap) {
   const out = {};
   const idPorNome = {};
   membros.forEach(m => {
-    out[m.id] = { pres:0, falta:0, just:0, ePres:0, eFalta:0, eJust:0, escalado:0, fnCount:{}, fnTop:null };
+    out[m.id] = { pres:0, falta:0, just:0, ePres:0, eFalta:0, eJust:0, trocas:0, escalado:0, fnCount:{}, fnTop:null };
     idPorNome[norm(m.nome)] = m.id;
   });
   Object.entries(presMap).forEach(([k, st]) => {
@@ -279,7 +292,7 @@ function calcStatsMembros(membros, historico, presMap) {
     else if (st === "falta") s.falta++;
     else if (st === "justificada") s.just++;
   });
-  historico.forEach(h => (h.resultado || []).forEach(d =>
+  historico.forEach(h => (h.resultado || []).forEach(d => {
     Object.entries(d.alocados || {}).forEach(([nome, fn]) => {
       const s = out[idPorNome[norm(nome)]];
       if (!s) return;
@@ -289,11 +302,71 @@ function calcStatsMembros(membros, historico, presMap) {
       if (stEsc === "presenca") s.ePres++;
       else if (stEsc === "falta") s.eFalta++;
       else if (stEsc === "justificada") s.eJust++;
-    })
-  ));
+    });
+    // trocas solicitadas = quem foi trocado (saiu da escala)
+    const quemSaiu = Array.isArray(d.trocas) ? d.trocas.map(t => t.de) : Object.values(d.substituicoes || {});
+    quemSaiu.forEach(nome => {
+      const s = out[idPorNome[norm(nome)]];
+      if (s) s.trocas++;
+    });
+  }));
   Object.values(out).forEach(s => {
     const top = Object.entries(s.fnCount).sort((a, b) => b[1] - a[1])[0];
     if (top) s.fnTop = { nome: top[0], qtd: top[1] };
+  });
+  return out;
+}
+
+// escore calculado a partir das presenças e faltas
+function escoreSugerido(s) {
+  const p = PESOS_ESCORE;
+  const v =
+    s.ePres * p.escala.presenca + s.eFalta * p.escala.falta + s.eJust * p.escala.justificada +
+    s.pres  * p.reuniao.presenca + s.falta  * p.reuniao.falta + s.just  * p.reuniao.justificada;
+  return Math.round(v * 10) / 10;
+}
+
+// o escore foi digitado manualmente? (sem a coluna nova, vale o comportamento antigo: escore diferente de 0 = manual)
+function escoreManual(m) {
+  if (m.score_editado === undefined) return (Number(m.score) || 0) !== 0;
+  return m.score_editado === true;
+}
+
+// em quantas escalas cada pessoa se disponibilizou e qual foi a última
+function calcDispStats(membros, historico, dias, disponibilidades, dispUltima) {
+  const out = {};
+  const idPorNome = {};
+  membros.forEach(m => {
+    out[m.id] = { escalasDisp:0, total:0, ultima:null };
+    idPorNome[norm(m.nome)] = m.id;
+  });
+  const diaIdsAtuais = new Set(dias.map(d => d.id));
+  const hist = [...historico].sort((a, b) => String(b.criado_em).localeCompare(String(a.criado_em)));
+  let atualSalva = false;
+  hist.forEach(h => {
+    const ids = new Set();
+    (h.resultado || []).forEach(d => {
+      if (diaIdsAtuais.has(d.id)) atualSalva = true;
+      // escalas salvas antes do registro de disponíveis: considera quem foi escalado
+      const lista = Array.isArray(d.disponiveis)
+        ? d.disponiveis
+        : [...Object.keys(d.alocados || {}), ...Object.values(d.substituicoes || {})];
+      lista.forEach(n => { const id = idPorNome[norm(n)]; if (id) ids.add(id); });
+    });
+    ids.forEach(id => {
+      out[id].escalasDisp++;
+      if (!out[id].ultima) out[id].ultima = { tipo:"salva", nome:h.nome, data:h.criado_em };
+    });
+  });
+  const atualAberta = dias.length > 0 && !atualSalva;
+  const total = hist.length + (atualAberta ? 1 : 0);
+  membros.forEach(m => {
+    const s = out[m.id];
+    s.total = total;
+    if (atualAberta && Object.values(disponibilidades).some(a => a.includes(m.nome))) {
+      s.escalasDisp++;
+      s.ultima = { tipo:"atual", nome:null, data:dispUltima[m.nome] || null };
+    }
   });
   return out;
 }
@@ -356,13 +429,16 @@ function BotoesStatus({valor,onChange}){
 // formulário de cadastro / edição de membro
 function FormMembro({inicial,onSalvar,onCancelar,salvando}){
   const [nome,setNome]=useState(inicial?.nome||"");
-  const [score,setScore]=useState(inicial?String(inicial.score??0):"0");
+  const [score,setScore]=useState(inicial&&inicial.scoreManual?String(inicial.score):"");
   const [funcoes,setFuncoes]=useState(inicial?.funcoes||[]);
+  const sug=inicial?.scoreSugerido??0;
   const tem=f=>funcoes.some(x=>norm(x)===norm(f));
   const toggle=f=>setFuncoes(p=>tem(f)?p.filter(x=>norm(x)!==norm(f)):[...p,f]);
   const salvar=()=>{
     if(!nome.trim()) return;
-    onSalvar({nome:nome.trim(),funcoes,score:parseFloat(String(score).replace(",","."))||0});
+    const txt=String(score).trim().replace(",",".");
+    const n=txt===""?null:parseFloat(txt);
+    onSalvar({nome:nome.trim(),funcoes,score:(n===null||Number.isNaN(n))?null:n});
   };
   return(
     <div style={{background:"rgba(0,0,0,0.35)",border:`1px solid ${C.ouro}60`,borderRadius:12,padding:16}}>
@@ -374,8 +450,9 @@ function FormMembro({inicial,onSalvar,onCancelar,salvando}){
           {inicial&&<div style={{fontSize:10,color:`${C.ouro}80`,marginTop:3}}>Alterar o nome não atualiza escalas já salvas no histórico.</div>}
         </div>
         <div>
-          <label style={lbl}>Escore</label>
-          <input type="number" step="any" value={score} onChange={e=>setScore(e.target.value)} style={inp}/>
+          <label style={lbl}>Escore (manual)</label>
+          <input type="number" step="any" value={score} onChange={e=>setScore(e.target.value)} placeholder={`Automático (${sug})`} style={inp}/>
+          <div style={{fontSize:10,color:`${C.ouro}80`,marginTop:3}}>Deixe em branco para usar o escore sugerido ({sug}). Se digitar um valor, ele prevalece.</div>
         </div>
       </div>
       <label style={lbl}>Funções que pode desempenhar</label>
@@ -523,6 +600,8 @@ function Painel(){
   const [dias,setDias]=useState([]);
   const [membros,setMembros]=useState([]);
   const [disponibilidades,setDisponibilidades]=useState({});
+  const [dispUltima,setDispUltima]=useState({});
+  const [dispDataOk,setDispDataOk]=useState(true);
   const [historico,setHistorico]=useState([]);
   const [eventos,setEventos]=useState([]);
   const [presMap,setPresMap]=useState({});
@@ -537,6 +616,7 @@ function Painel(){
 
   const [formEvento,setFormEvento]=useState({nome:"",descricao:"",data:""});
   const [buscaMembro,setBuscaMembro]=useState("");
+  const [ordemCadastro,setOrdemCadastro]=useState("nome");
   const [buscaEvento,setBuscaEvento]=useState("");
   const [editandoId,setEditandoId]=useState(null);
   const [xlsxStatus,setXlsxStatus]=useState(null);
@@ -545,23 +625,48 @@ function Painel(){
   const [abertoId,setAbertoId]=useState(null);
   const [trocandoKey,setTrocandoKey]=useState(null);
   const filaRef=useRef(Promise.resolve());
+  const colDispRef=useRef(true);
 
   const [loading,setLoading]=useState(true);
   const [salvando,setSalvando]=useState(false);
 
   // ── carregamento ──
+  // busca as disponibilidades com a data de preenchimento (se a coluna já existir no banco)
+  const buscarDisp=async()=>{
+    if(colDispRef.current){
+      try{
+        const r=await dbGetAll("disponibilidades","select=membro_id,dia_id,criado_em&order=id");
+        setDispDataOk(true);
+        return r;
+      }catch(e){
+        if(!String(e.message).includes("criado_em")) throw e;
+        colDispRef.current=false;
+        setDispDataOk(false);
+      }
+    }
+    return dbGetAll("disponibilidades","select=membro_id,dia_id&order=id");
+  };
+
   const carregarDados=async(completo=false)=>{
     try{
       const [ds,ms,dps]=await Promise.all([
         dbGet("dias_escala","select=*&order=data,horario"),
         dbGet("membros","select=*&order=nome"),
-        dbGetAll("disponibilidades","select=membro_id,dia_id&order=id"),
+        buscarDisp(),
       ]);
       setDias(ds); setMembros(ms);
       const map={};
+      const ult={};
       for(const d of ds) map[d.id]=[];
-      for(const dp of dps){const m=ms.find(x=>x.id===dp.membro_id);if(m&&map[dp.dia_id])map[dp.dia_id].push(m.nome);}
+      for(const dp of dps){
+        const m=ms.find(x=>x.id===dp.membro_id);
+        if(m&&map[dp.dia_id]){
+          map[dp.dia_id].push(m.nome);
+          if(dp.criado_em&&(!ult[m.nome]||dp.criado_em>ult[m.nome])) ult[m.nome]=dp.criado_em;
+        }
+      }
       setDisponibilidades(map);
+      setDispUltima(ult);
     }catch(e){console.error(e);}
 
     if(completo){
@@ -590,6 +695,21 @@ function Painel(){
     return()=>clearInterval(iv);
   },[]);
 
+  // ── derivados (antes de qualquer retorno antecipado) ──
+  const statsMembros=useMemo(()=>calcStatsMembros(membros,historico,presMap),[membros,historico,presMap]);
+
+  // membros com o escore EM USO: o manual prevalece; sem manual vale o sugerido
+  const membrosEf=useMemo(()=>membros.map(m=>{
+    const s=statsMembros[m.id];
+    const sugerido=s?escoreSugerido(s):0;
+    const manual=escoreManual(m);
+    return {...m,scoreManual:manual,scoreSugerido:sugerido,score:manual?(Number(m.score)||0):sugerido};
+  }),[membros,statsMembros]);
+
+  const dispStats=useMemo(()=>calcDispStats(membros,historico,dias,disponibilidades,dispUltima),[membros,historico,dias,disponibilidades,dispUltima]);
+
+  const colScoreOk=membros.length===0||membros[0].score_editado!==undefined;
+
   // ── dias da escala ──
   const addDia=async()=>{
     const horario=formDia.usarCustom?formDia.horarioCustom:formDia.horario;
@@ -616,18 +736,42 @@ function Painel(){
       alert("Já existe um membro com esse nome.");
       return;
     }
+    // score nulo = automático (usa o sugerido); com valor = manual (prevalece)
+    const payload={nome:dados.nome,funcoes:dados.funcoes};
+    if(dados.score===null){
+      if(colScoreOk) payload.score_editado=false;
+      else payload.score=0;
+    } else {
+      payload.score=dados.score;
+      if(colScoreOk) payload.score_editado=true;
+    }
     setSalvando(true);
     try{
       if(id){
-        const [atual]=await dbPatch("membros",`id=eq.${id}`,dados);
-        setMembros(p=>p.map(m=>m.id===id?{...m,...(atual||dados)}:m));
+        const [atual]=await dbPatch("membros",`id=eq.${id}`,payload);
+        setMembros(p=>p.map(m=>m.id===id?{...m,...(atual||payload)}:m));
       } else {
-        const [novo]=await dbInsert("membros",[dados]);
+        const [novo]=await dbInsert("membros",[payload]);
         setMembros(p=>[...p,novo]);
       }
       setEditandoId(null);
     }catch(e){alert("Erro ao salvar membro: "+e.message);}
     setSalvando(false);
+  };
+
+  const usarEscoreSugerido=async(m)=>{
+    try{
+      await dbPatch("membros",`id=eq.${m.id}`,{score_editado:false});
+      setMembros(p=>p.map(x=>x.id===m.id?{...x,score_editado:false}:x));
+    }catch(e){alert("Erro: "+e.message);}
+  };
+
+  const usarSugeridoTodos=async()=>{
+    if(!window.confirm("Usar o escore sugerido para TODOS os membros? Os escores digitados manualmente deixam de valer (o valor digitado continua guardado, mas não é usado)."))return;
+    try{
+      await dbPatch("membros","id=neq.00000000-0000-0000-0000-000000000000",{score_editado:false});
+      setMembros(p=>p.map(x=>({...x,score_editado:false})));
+    }catch(e){alert("Erro: "+e.message);}
   };
 
   const removerMembro=async(m)=>{
@@ -656,12 +800,14 @@ function Painel(){
       const novos=[];
       rows.forEach(row=>{
         const nome=String(row[nomeKey]||"").trim();if(!nome)return;
-        const score=scoreKey?parseFloat(String(row[scoreKey]||"0").replace(",","."))||0:0;
+        const txtScore=scoreKey?String(row[scoreKey]).trim():"";
+        const temScore=txtScore!=="";
+        const score=temScore?(parseFloat(txtScore.replace(",","."))||0):0;
         const funcoes=funcCols
           .filter(col=>{const v=String(row[col]||"").trim().toLowerCase();return v==="sim"||v==="s"||v==="yes"||v==="x"||v==="1";})
           .map(col=>FUNCOES_BASE.find(f=>norm(f)===norm(col))||col)
           .filter(f=>FUNCOES_BASE.some(fb=>norm(fb)===norm(f)));
-        novos.push({nome,funcoes,score});
+        novos.push({nome,funcoes,score,temScore});
       });
 
       // atualiza quem já existe (pelo nome) e cria quem é novo — sem apagar ninguém
@@ -672,8 +818,18 @@ function Painel(){
       const inserir=[];
       novos.forEach(m=>{
         const id=mapa[norm(m.nome)];
-        if(id) patches.push(dbPatch("membros",`id=eq.${id}`,{funcoes:m.funcoes,score:m.score}));
-        else inserir.push({nome:m.nome,funcoes:m.funcoes,score:m.score});
+        if(id){
+          const corpo={funcoes:m.funcoes};
+          if(m.temScore){
+            corpo.score=m.score;
+            if(colScoreOk) corpo.score_editado=true;
+          }
+          patches.push(dbPatch("membros",`id=eq.${id}`,corpo));
+        } else {
+          const novo={nome:m.nome,funcoes:m.funcoes,score:m.score};
+          if(colScoreOk) novo.score_editado=m.temScore;
+          inserir.push(novo);
+        }
       });
       await Promise.all(patches);
       if(inserir.length) await dbInsert("membros",inserir);
@@ -793,14 +949,19 @@ function Painel(){
       const original=subs[antigo]||antigo;
       delete subs[antigo];
       if(norm(original)!==norm(novo))subs[novo]=original;
-      return {...d,alocados,status,substituicoes:subs};
+      // registro das trocas (quem saiu e quem entrou); aproveita as trocas antigas se ainda não havia o registro
+      const trocas=Array.isArray(d.trocas)?[...d.trocas]:Object.entries(d.substituicoes||{}).map(([para,de])=>({de,para}));
+      const iDesfazer=trocas.map(t=>norm(t.de)===norm(novo)&&norm(t.para)===norm(antigo)).lastIndexOf(true);
+      if(iDesfazer>=0)trocas.splice(iDesfazer,1);
+      else trocas.push({de:antigo,para:novo});
+      return {...d,alocados,status,substituicoes:subs,trocas};
     });
     salvarResultadoHistorico(h.id,resultado,h.resultado);
   };
 
   // ── sorteio ──
   const gerarSorteio=()=>{
-    const r=sortearEscala(dias,membros,disponibilidades,historico,manualSlots);
+    const r=sortearEscala(dias,membrosEf,disponibilidades,historico,manualSlots);
     setSorteioAtual(r);
     setAba("escalas");
     setSub("sorteio");
@@ -810,7 +971,9 @@ function Painel(){
     if(!sorteioAtual)return;
     setSalvando(true);
     try{
-      const [novo]=await dbInsert("historico_escalas",[{nome:nomeEscala||`Escala ${new Date().toLocaleDateString("pt-BR")}`,resultado:sorteioAtual.resultado,pendentes:(sorteioAtual.pendentes||[]).map(p=>p.nome||p)}]);
+      // guarda também quem estava disponível em cada missa (para as estatísticas do cadastro)
+      const resultado=sorteioAtual.resultado.map(d=>({...d,disponiveis:disponibilidades[d.id]||[]}));
+      const [novo]=await dbInsert("historico_escalas",[{nome:nomeEscala||`Escala ${new Date().toLocaleDateString("pt-BR")}`,resultado,pendentes:(sorteioAtual.pendentes||[]).map(p=>p.nome||p)}]);
       setHistorico(p=>[{...novo,resultado:novo.resultado||[]},...p]);
       alert("Escala salva!");
     }catch(e){alert("Erro: "+e.message);}
@@ -825,19 +988,30 @@ function Painel(){
     }catch(e){alert("Erro ao excluir: "+e.message);}
   };
 
-  // ── derivados ──
+  // ── mais derivados ──
   const linkMembro=`${window.location.origin}${window.location.pathname}?membro=1`;
   const statsPre=calcPre(dias,membros,disponibilidades);
   const statsPos=sorteioAtual?calcPos(sorteioAtual,membros,disponibilidades):null;
-  const statsMembros=useMemo(()=>calcStatsMembros(membros,historico,presMap),[membros,historico,presMap]);
 
-  const membrosCadastro=[...membros].filter(m=>norm(m.nome).includes(norm(buscaMembro))).sort((a,b)=>a.nome.localeCompare(b.nome));
+  const chaveParado=m=>{
+    const du=(dispStats[m.id]||{}).ultima;
+    if(!du) return 0;
+    if(du.tipo==="atual"&&!du.data) return Date.now();
+    return new Date(du.data).getTime()||0;
+  };
+  const membrosCadastro=membrosEf.filter(m=>norm(m.nome).includes(norm(buscaMembro))).sort((a,b)=>{
+    if(ordemCadastro==="escore") return (b.score-a.score)||a.nome.localeCompare(b.nome);
+    if(ordemCadastro==="parado") return (chaveParado(a)-chaveParado(b))||a.nome.localeCompare(b.nome);
+    if(ordemCadastro==="trocas") return ((statsMembros[b.id]?.trocas||0)-(statsMembros[a.id]?.trocas||0))||a.nome.localeCompare(b.nome);
+    return a.nome.localeCompare(b.nome);
+  });
   const membrosEvento=[...membros].filter(m=>norm(m.nome).includes(norm(buscaEvento))).sort((a,b)=>a.nome.localeCompare(b.nome));
 
   if(simMembro) return <TelaMembro onVoltar={()=>setSimMembro(false)}/>;
   if(loading) return <div style={bgApp}><Spinner/></div>;
 
   const thBase={background:"#3d0000",color:C.ouro,padding:"8px 6px",fontSize:11,letterSpacing:.5,borderBottom:`1px solid ${C.ouro}50`,borderRight:`1px solid ${C.ouro}20`,textAlign:"center",verticalAlign:"top"};
+  const P=PESOS_ESCORE;
 
   return(
     <div style={bgApp}>
@@ -871,6 +1045,19 @@ function Painel(){
         {/* ═════════ CADASTRO ═════════ */}
         {aba==="cadastro"&&(
           <div>
+            {!colScoreOk&&(
+              <Card style={{marginBottom:12,border:"1px solid #ff884460"}}>
+                <SecTitle>⚠️ Escore sugerido ainda não ativado</SecTitle>
+                <div style={{fontSize:12,color:"#ffaa66"}}>Rode o SQL do escore (coluna <strong>score_editado</strong>) no Supabase e recarregue a página para ativar o escore sugerido.</div>
+              </Card>
+            )}
+            {!dispDataOk&&(
+              <Card style={{marginBottom:12,border:"1px solid #ff884460"}}>
+                <SecTitle>⚠️ Data do formulário não registrada</SecTitle>
+                <div style={{fontSize:12,color:"#ffaa66"}}>Rode o SQL da coluna <strong>criado_em</strong> em disponibilidades para registrar a data em que cada pessoa preenche o formulário.</div>
+              </Card>
+            )}
+
             <Card style={{marginBottom:12}}>
               <SecTitle>➕ Adicionar membros</SecTitle>
               <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
@@ -885,8 +1072,14 @@ function Painel(){
                 {xlsxStatus==="erro"&&<span style={{color:"#ff7044",fontSize:12}}>❌ {xlsxMsg}</span>}
               </div>
               <p style={{color:`${C.ouroPale}`,fontSize:11,margin:"10px 0 0",opacity:.8}}>
-                A planilha precisa das colunas <strong>Nome</strong>, <strong>Score</strong> e uma coluna por função com Sim/Não. Quem já está cadastrado (mesmo nome) é atualizado; quem é novo é adicionado. Ninguém é apagado pela importação.
+                A planilha precisa das colunas <strong>Nome</strong>, <strong>Score</strong> e uma coluna por função com Sim/Não. Quem já está cadastrado (mesmo nome) é atualizado; quem é novo é adicionado. Ninguém é apagado pela importação. Escores preenchidos na planilha passam a valer como escores manuais.
               </p>
+            </Card>
+
+            <Card style={{marginBottom:12,padding:12}}>
+              <div style={{fontSize:11,color:C.ouroPale,lineHeight:1.6}}>
+                <strong style={{color:C.ouro}}>Como o escore sugerido é calculado:</strong> presença em escala {P.escala.presenca>0?"+":""}{P.escala.presenca}, falta em escala {P.escala.falta}, presença em reunião +{P.reuniao.presenca}, falta em reunião {P.reuniao.falta}. Justificadas não pontuam. O escore digitado manualmente sempre prevalece.
+              </div>
             </Card>
 
             {editandoId==="novo"&&(
@@ -897,24 +1090,52 @@ function Painel(){
 
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
               <div style={{fontSize:12,color:C.ouro,letterSpacing:2,textTransform:"uppercase"}}>{membros.length} membro(s) cadastrado(s)</div>
-              <input placeholder="🔍 Buscar membro…" value={buscaMembro} onChange={e=>setBuscaMembro(e.target.value)} style={{...inp,maxWidth:280}}/>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                <select value={ordemCadastro} onChange={e=>setOrdemCadastro(e.target.value)} style={{...inp,width:"auto",fontSize:12}}>
+                  <option value="nome">Ordenar: Nome (A–Z)</option>
+                  <option value="escore">Ordenar: Maior escore</option>
+                  <option value="parado">Ordenar: Mais tempo sem se disponibilizar</option>
+                  <option value="trocas">Ordenar: Mais trocas solicitadas</option>
+                </select>
+                <input placeholder="🔍 Buscar membro…" value={buscaMembro} onChange={e=>setBuscaMembro(e.target.value)} style={{...inp,maxWidth:230}}/>
+                {colScoreOk&&membros.length>0&&<button onClick={usarSugeridoTodos} style={{...btnSec,fontSize:11,padding:"8px 12px"}} title="Remove os escores manuais de todos">↺ Usar escore sugerido em todos</button>}
+              </div>
             </div>
 
             {!membros.length&&<div style={{textAlign:"center",color:`${C.ouro}50`,padding:36,fontSize:13}}>Nenhum membro cadastrado. Adicione um novo ou importe a planilha.</div>}
 
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(310px,1fr))",gap:10}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))",gap:10}}>
               {membrosCadastro.map(m=>{
                 if(editandoId===m.id) return(
                   <div key={m.id} style={{gridColumn:"1 / -1"}}>
                     <FormMembro inicial={m} onSalvar={d=>salvarMembro(d,m.id)} onCancelar={()=>setEditandoId(null)} salvando={salvando}/>
                   </div>
                 );
-                const s=statsMembros[m.id]||{pres:0,falta:0,just:0,ePres:0,eFalta:0,eJust:0,escalado:0,fnTop:null};
+                const s=statsMembros[m.id]||{pres:0,falta:0,just:0,ePres:0,eFalta:0,eJust:0,trocas:0,escalado:0,fnTop:null};
+                const dd=dispStats[m.id]||{escalasDisp:0,total:0,ultima:null};
+                const du=dd.ultima;
+                let ultTxt="Nunca se disponibilizou";
+                let ultCor="#ff8a8a";
+                if(du){
+                  const rotulo=du.tipo==="atual"?"Escala atual (em aberto)":du.nome;
+                  const nd=du.data?diasDesde(du.data):null;
+                  ultTxt=`${rotulo}${du.data?` · ${fmtISO(du.data)}`:""}${nd!==null?` (${nd===0?"hoje":`há ${nd} dia(s)`})`:""}`;
+                  ultCor=nd===null||nd<=21?"#7bd88f":nd<=60?"#f0d060":"#ff8a8a";
+                }
+                const mostraSug=m.scoreManual&&Math.abs(m.scoreSugerido-m.score)>=0.05;
                 return(
                   <Card key={m.id} style={{padding:12,border:`1px solid ${(m.funcoes||[]).length>0?C.ouro+"50":C.ouro+"25"}`}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:6}}>
                       <div style={{color:C.branco,fontSize:13,fontWeight:700,lineHeight:1.3}}>{m.nome}</div>
-                      <span style={{fontSize:11,color:C.ouro,background:`${C.ouro}20`,borderRadius:4,padding:"2px 7px",flexShrink:0}}>★ {m.score||0}</span>
+                      <div style={{display:"flex",flexWrap:"wrap",justifyContent:"flex-end",alignItems:"center",gap:4,flexShrink:0,maxWidth:200}}>
+                        <span style={{fontSize:11,color:C.ouro,background:`${C.ouro}20`,borderRadius:4,padding:"2px 7px"}} title={m.scoreManual?"Escore definido manualmente":"Escore calculado automaticamente"}>★ {m.score}{m.scoreManual?" ✏️":" · auto"}</span>
+                        {mostraSug&&(
+                          <span style={{fontSize:10,color:"#88ddff",background:"rgba(136,221,255,0.12)",border:"1px solid rgba(136,221,255,0.35)",borderRadius:4,padding:"2px 6px",display:"inline-flex",alignItems:"center",gap:4}} title="Calculado a partir das presenças e faltas">
+                            ESCORE SUGERIDO: {m.scoreSugerido}
+                            {colScoreOk&&<button onClick={()=>usarEscoreSugerido(m)} style={{background:"none",border:`1px solid rgba(136,221,255,0.5)`,color:"#88ddff",borderRadius:3,fontSize:9,padding:"0 4px",cursor:"pointer",fontFamily:"inherit"}}>usar</button>}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:8,minHeight:18}}>
                       {(m.funcoes||[]).length===0
@@ -933,9 +1154,12 @@ function Painel(){
                       <Mini label="Faltas" valor={s.eFalta} cor="#ff8a8a"/>
                       <Mini label="Justificadas" valor={s.eJust} cor="#f0d060"/>
                     </div>
-                    <div style={{marginTop:7,fontSize:11,color:C.ouroPale,lineHeight:1.5}}>
+                    <div style={{marginTop:7,fontSize:11,color:C.ouroPale,lineHeight:1.6}}>
                       🎲 Escalado <strong style={{color:C.ouroClaro}}>{s.escalado}</strong> vez(es)<br/>
-                      ⭐ Função que mais desempenha: <strong style={{color:C.ouroClaro}}>{s.fnTop?`${s.fnTop.nome} (${s.fnTop.qtd}x)`:"—"}</strong>
+                      ⭐ Função que mais desempenha: <strong style={{color:C.ouroClaro}}>{s.fnTop?`${s.fnTop.nome} (${s.fnTop.qtd}x)`:"—"}</strong><br/>
+                      🔄 Trocas solicitadas: <strong style={{color:C.ouroClaro}}>{s.trocas}</strong><br/>
+                      📝 Disponível em <strong style={{color:C.ouroClaro}}>{dd.escalasDisp}</strong> de <strong style={{color:C.ouroClaro}}>{dd.total}</strong> escala(s)<br/>
+                      🕒 Último formulário: <strong style={{color:ultCor}}>{ultTxt}</strong>
                     </div>
                     <div style={{display:"flex",gap:6,marginTop:9}}>
                       <button onClick={()=>setEditandoId(m.id)} style={{...btnSec,fontSize:11,padding:"5px 12px"}}>✏️ Editar</button>
@@ -1199,12 +1423,12 @@ function Painel(){
                         <div key={fn} style={{background:f>0?"rgba(180,40,0,0.2)":`${C.ouro}08`,border:`1px solid ${f>0?"#ff440035":C.ouro+"35"}`,borderRadius:7,padding:"7px 9px"}}>
                           <div style={{fontSize:10,letterSpacing:1,color:C.ouro,marginBottom:3,textTransform:"uppercase"}}>{fn} ({qtd})</div>
                           {pessoas.map(p=>{
-                            const mb=membros.find(m=>m.nome===p);
+                            const mb=membrosEf.find(m=>m.nome===p);
                             const highlight=buscaSorteio&&p.toLowerCase().includes(buscaSorteio.toLowerCase());
                             return(
                               <div key={p} style={{fontSize:11,color:highlight?"#FFD700":C.ouroPale,marginBottom:1,display:"flex",justifyContent:"space-between",background:highlight?"rgba(255,215,0,0.1)":"transparent",borderRadius:3,padding:"1px 3px"}}>
                                 <span>✓ {p.split(" ").slice(0,2).join(" ")}</span>
-                                {mb?.score>0&&<span style={{color:C.ouro,fontSize:10}}>★{mb.score}</span>}
+                                {mb&&mb.score!==0&&<span style={{color:C.ouro,fontSize:10}}>★{mb.score}</span>}
                               </div>
                             );
                           })}
@@ -1218,7 +1442,7 @@ function Painel(){
                   {(()=>{
                     const escaladosNoDia=new Set(Object.keys(dia.alocados||{}));
                     const dispDia=disponibilidades[dia.id]||[];
-                    const substitutos=membros
+                    const substitutos=membrosEf
                       .filter(m=>dispDia.includes(m.nome)&&!escaladosNoDia.has(m.nome))
                       .sort((a,b)=>{
                         const escA=sorteioAtual?.escAtual?.[a.nome]||0;
@@ -1236,7 +1460,7 @@ function Painel(){
                             <div key={m.nome} style={{display:"flex",alignItems:"center",gap:4,background:`${C.ouro}12`,border:`1px solid ${C.ouro}30`,borderRadius:5,padding:"2px 7px",fontSize:11,color:C.ouroPale}}>
                               <span style={{color:C.ouro,fontSize:10,fontWeight:700}}>{i+1}º</span>
                               {m.nome.split(" ").slice(0,2).join(" ")}
-                              {m.score>0&&<span style={{color:C.ouro,fontSize:10}}>★{m.score}</span>}
+                              {m.score!==0&&<span style={{color:C.ouro,fontSize:10}}>★{m.score}</span>}
                             </div>
                           ))}
                         </div>
