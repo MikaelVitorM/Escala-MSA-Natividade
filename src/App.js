@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 
 const SUPABASE_URL = "https://sdhxphydfowlftoiwjwt.supabase.co";
@@ -264,12 +264,12 @@ function calcPos({resultado,pendentes},membros,disponibilidades){
   return{escaladoPor,dispPor,media:count>0?(total/count).toFixed(1):0,pendentes};
 }
 
-// estatísticas de cada membro: presenças em eventos + escalas salvas
+// estatísticas de cada membro: presenças em eventos + presenças nas escalas salvas
 function calcStatsMembros(membros, historico, presMap) {
   const out = {};
   const idPorNome = {};
   membros.forEach(m => {
-    out[m.id] = { pres:0, falta:0, just:0, escalado:0, fnCount:{}, fnTop:null };
+    out[m.id] = { pres:0, falta:0, just:0, ePres:0, eFalta:0, eJust:0, escalado:0, fnCount:{}, fnTop:null };
     idPorNome[norm(m.nome)] = m.id;
   });
   Object.entries(presMap).forEach(([k, st]) => {
@@ -285,6 +285,10 @@ function calcStatsMembros(membros, historico, presMap) {
       if (!s) return;
       s.escalado++;
       s.fnCount[fn] = (s.fnCount[fn] || 0) + 1;
+      const stEsc = (d.status || {})[nome];
+      if (stEsc === "presenca") s.ePres++;
+      else if (stEsc === "falta") s.eFalta++;
+      else if (stEsc === "justificada") s.eJust++;
     })
   ));
   Object.values(out).forEach(s => {
@@ -292,6 +296,28 @@ function calcStatsMembros(membros, historico, presMap) {
     if (top) s.fnTop = { nome: top[0], qtd: top[1] };
   });
   return out;
+}
+
+// resumo de presenças de uma escala salva
+function resumoEscala(h) {
+  let pres = 0, falta = 0, just = 0, total = 0;
+  (h.resultado || []).forEach(d => Object.keys(d.alocados || {}).forEach(n => {
+    total++;
+    const s = (d.status || {})[n];
+    if (s === "presenca") pres++;
+    else if (s === "falta") falta++;
+    else if (s === "justificada") just++;
+  }));
+  return { pres, falta, just, total, pend: total - pres - falta - just };
+}
+
+// escalados de uma missa, na ordem das funções
+function ordenarEscalados(dia) {
+  const ordem = (dia.funcs || []).map(f => f.nome);
+  return Object.entries(dia.alocados || {}).sort((a, b) => {
+    const ia = ordem.indexOf(a[1]), ib = ordem.indexOf(b[1]);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
 }
 
 // ── componentes base ──────────────────────────────────────────────────────────
@@ -309,6 +335,22 @@ function Mini({label,valor,cor}){
     <div style={{fontSize:16,fontWeight:700,color:cor}}>{valor}</div>
     <div style={{fontSize:9,color:C.ouroPale,letterSpacing:.5,textTransform:"uppercase"}}>{label}</div>
   </div>;
+}
+
+// botões PRESENÇA / FALTA / JUSTIFICADA (clicar de novo no ativo limpa a marcação)
+function BotoesStatus({valor,onChange}){
+  return(
+    <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+      {Object.entries(STATUS).map(([k,cfg])=>{
+        const ativo=valor===k;
+        return(
+          <button key={k} onClick={()=>onChange(ativo?undefined:k)} style={{border:`1px solid ${cfg.bg}`,background:ativo?cfg.bg:"transparent",color:ativo?cfg.fg:cfg.bg,borderRadius:5,padding:"3px 8px",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"inherit",opacity:ativo?1:.85}}>
+            {ativo?"✓ ":""}{cfg.label}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 // formulário de cadastro / edição de membro
@@ -499,6 +541,10 @@ function Painel(){
   const [editandoId,setEditandoId]=useState(null);
   const [xlsxStatus,setXlsxStatus]=useState(null);
   const [xlsxMsg,setXlsxMsg]=useState("");
+
+  const [abertoId,setAbertoId]=useState(null);
+  const [trocandoKey,setTrocandoKey]=useState(null);
+  const filaRef=useRef(Promise.resolve());
 
   const [loading,setLoading]=useState(true);
   const [salvando,setSalvando]=useState(false);
@@ -705,6 +751,53 @@ function Painel(){
     }
   };
 
+  // ── presença e trocas nas escalas salvas (gravadas dentro do próprio histórico) ──
+  const salvarResultadoHistorico=(id,resultado,anterior)=>{
+    setHistorico(p=>p.map(x=>x.id===id?{...x,resultado}:x));
+    filaRef.current=filaRef.current
+      .then(()=>dbPatch("historico_escalas",`id=eq.${id}`,{resultado}))
+      .catch(e=>{
+        setHistorico(p=>p.map(x=>x.id===id?{...x,resultado:anterior}:x));
+        alert("Erro ao salvar alteração: "+e.message);
+      });
+  };
+
+  const definirStatusEscala=(h,idx,nome,novo)=>{
+    const resultado=h.resultado.map((d,i)=>{
+      if(i!==idx)return d;
+      const status={...(d.status||{})};
+      if(novo)status[nome]=novo;else delete status[nome];
+      return {...d,status};
+    });
+    salvarResultadoHistorico(h.id,resultado,h.resultado);
+  };
+
+  const marcarTodosPresentesEscala=(h,idx)=>{
+    const resultado=h.resultado.map((d,i)=>{
+      if(i!==idx)return d;
+      const status={...(d.status||{})};
+      Object.keys(d.alocados||{}).forEach(n=>{if(!status[n])status[n]="presenca";});
+      return {...d,status};
+    });
+    salvarResultadoHistorico(h.id,resultado,h.resultado);
+  };
+
+  const trocarEscalado=(h,idx,antigo,novo)=>{
+    const resultado=h.resultado.map((d,i)=>{
+      if(i!==idx)return d;
+      const alocados={};
+      Object.entries(d.alocados||{}).forEach(([n,fn])=>{alocados[n===antigo?novo:n]=fn;});
+      const status={...(d.status||{})};
+      delete status[antigo];
+      const subs={...(d.substituicoes||{})};
+      const original=subs[antigo]||antigo;
+      delete subs[antigo];
+      if(norm(original)!==norm(novo))subs[novo]=original;
+      return {...d,alocados,status,substituicoes:subs};
+    });
+    salvarResultadoHistorico(h.id,resultado,h.resultado);
+  };
+
   // ── sorteio ──
   const gerarSorteio=()=>{
     const r=sortearEscala(dias,membros,disponibilidades,historico,manualSlots);
@@ -725,8 +818,11 @@ function Painel(){
   };
 
   const excluirHistorico=async(id)=>{
-    await dbDelete("historico_escalas",`id=eq.${id}`);
-    setHistorico(p=>p.filter(h=>h.id!==id));
+    if(!window.confirm("Excluir esta escala salva? As presenças e trocas registradas nela também serão perdidas."))return;
+    try{
+      await dbDelete("historico_escalas",`id=eq.${id}`);
+      setHistorico(p=>p.filter(h=>h.id!==id));
+    }catch(e){alert("Erro ao excluir: "+e.message);}
   };
 
   // ── derivados ──
@@ -813,7 +909,7 @@ function Painel(){
                     <FormMembro inicial={m} onSalvar={d=>salvarMembro(d,m.id)} onCancelar={()=>setEditandoId(null)} salvando={salvando}/>
                   </div>
                 );
-                const s=statsMembros[m.id]||{pres:0,falta:0,just:0,escalado:0,fnTop:null};
+                const s=statsMembros[m.id]||{pres:0,falta:0,just:0,ePres:0,eFalta:0,eJust:0,escalado:0,fnTop:null};
                 return(
                   <Card key={m.id} style={{padding:12,border:`1px solid ${(m.funcoes||[]).length>0?C.ouro+"50":C.ouro+"25"}`}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:6}}>
@@ -825,10 +921,17 @@ function Painel(){
                         ?<span style={{color:`${C.ouro}60`,fontSize:10}}>Sem funções cadastradas</span>
                         :(m.funcoes||[]).map(f=><span key={f} style={{fontSize:10,background:`${C.ouro}20`,color:C.ouro,border:`1px solid ${C.ouro}40`,borderRadius:4,padding:"1px 5px"}}>{f}</span>)}
                     </div>
+                    <div style={{fontSize:9,color:`${C.ouro}90`,letterSpacing:1,textTransform:"uppercase",marginBottom:3}}>Reuniões e eventos</div>
                     <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:4}}>
                       <Mini label="Presenças" valor={s.pres} cor="#7bd88f"/>
                       <Mini label="Faltas" valor={s.falta} cor="#ff8a8a"/>
                       <Mini label="Justificadas" valor={s.just} cor="#f0d060"/>
+                    </div>
+                    <div style={{fontSize:9,color:`${C.ouro}90`,letterSpacing:1,textTransform:"uppercase",margin:"7px 0 3px"}}>Escalas</div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:4}}>
+                      <Mini label="Presenças" valor={s.ePres} cor="#7bd88f"/>
+                      <Mini label="Faltas" valor={s.eFalta} cor="#ff8a8a"/>
+                      <Mini label="Justificadas" valor={s.eJust} cor="#f0d060"/>
                     </div>
                     <div style={{marginTop:7,fontSize:11,color:C.ouroPale,lineHeight:1.5}}>
                       🎲 Escalado <strong style={{color:C.ouroClaro}}>{s.escalado}</strong> vez(es)<br/>
@@ -1146,29 +1249,105 @@ function Painel(){
           </div>
         )}
 
+        {/* ═════════ HISTÓRICO ═════════ */}
         {aba==="escalas"&&sub==="historico"&&(
           <div>
             <SecTitle>📋 Histórico de escalas</SecTitle>
             {!historico.length&&<div style={{textAlign:"center",color:`${C.ouro}50`,padding:36,fontSize:13}}>Nenhuma escala salva.</div>}
-            {historico.map(h=>(
-              <Card key={h.id} style={{marginBottom:10}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:7}}>
-                  <div>
-                    <div style={{color:C.branco,fontWeight:600,fontSize:13}}>{h.nome}</div>
-                    <div style={{color:C.ouroPale,fontSize:11,marginTop:1}}>{new Date(h.criado_em).toLocaleDateString("pt-BR",{day:"2-digit",month:"long",year:"numeric"})}</div>
+            {historico.map(h=>{
+              const r=resumoEscala(h);
+              const aberto=abertoId===h.id;
+              return(
+                <Card key={h.id} style={{marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,flexWrap:"wrap",marginBottom:7}}>
+                    <div>
+                      <div style={{color:C.branco,fontWeight:600,fontSize:13}}>{h.nome}</div>
+                      <div style={{color:C.ouroPale,fontSize:11,marginTop:1}}>{new Date(h.criado_em).toLocaleDateString("pt-BR",{day:"2-digit",month:"long",year:"numeric"})}</div>
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>{setAbertoId(aberto?null:h.id);setTrocandoKey(null);}} style={{...btnSec,fontSize:11,padding:"4px 12px"}}>{aberto?"▲ Fechar":"📂 Abrir"}</button>
+                      <button onClick={()=>excluirHistorico(h.id)} style={{background:"rgba(150,0,0,0.6)",border:`1px solid ${C.ouro}40`,color:C.ouroPale,borderRadius:7,padding:"4px 10px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>Excluir</button>
+                    </div>
                   </div>
-                  <button onClick={()=>excluirHistorico(h.id)} style={{background:"rgba(150,0,0,0.6)",border:`1px solid ${C.ouro}40`,color:C.ouroPale,borderRadius:5,padding:"3px 8px",cursor:"pointer",fontSize:11}}>Excluir</button>
-                </div>
-                <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:5}}>
-                  {(h.resultado||[]).map((dia,i)=>(
-                    <span key={i} style={{fontSize:10,background:`${C.ouro}15`,color:C.ouro,border:`1px solid ${C.ouro}30`,borderRadius:4,padding:"1px 5px",textTransform:"capitalize"}}>
-                      {fmtData(dia.data).split(",")[0]} {dia.horario}
-                    </span>
-                  ))}
-                </div>
-                {(h.pendentes||[]).length>0&&<div style={{fontSize:11,color:"#88ddff"}}>🔖 Pendentes: {h.pendentes.slice(0,5).map(p=>(p.nome||p).split(" ")[0]).join(", ")}{h.pendentes.length>5?` +${h.pendentes.length-5}`:""}</div>}
-              </Card>
-            ))}
+                  <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:6}}>
+                    {(h.resultado||[]).map((dia,i)=>(
+                      <span key={i} style={{fontSize:10,background:`${C.ouro}15`,color:C.ouro,border:`1px solid ${C.ouro}30`,borderRadius:4,padding:"1px 5px",textTransform:"capitalize"}}>
+                        {fmtData(dia.data).split(",")[0]} {dia.horario}
+                      </span>
+                    ))}
+                  </div>
+                  <div style={{display:"flex",gap:12,flexWrap:"wrap",fontSize:11,marginBottom:6}}>
+                    <span style={{color:"#7bd88f"}}>✅ {r.pres} presença(s)</span>
+                    <span style={{color:"#ff8a8a"}}>❌ {r.falta} falta(s)</span>
+                    <span style={{color:"#f0d060"}}>📝 {r.just} justificada(s)</span>
+                    <span style={{color:C.ouroPale,opacity:.8}}>⏳ {r.pend} sem registro</span>
+                  </div>
+
+                  {aberto&&(
+                    <div style={{display:"flex",flexDirection:"column",gap:10,margin:"10px 0"}}>
+                      {(h.resultado||[]).map((dia,idx)=>{
+                        const escalados=ordenarEscalados(dia);
+                        const nomesNoDia=new Set(escalados.map(([n])=>n));
+                        const ehBispo=dia.tem_bispo||dia.temBispo;
+                        const ehIncenso=dia.tem_incenso||dia.temIncenso;
+                        return(
+                          <div key={idx} style={{background:"rgba(0,0,0,0.3)",border:`1px solid ${C.ouro}35`,borderRadius:10,padding:12}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,flexWrap:"wrap",marginBottom:6}}>
+                              <div>
+                                <div style={{color:C.branco,fontWeight:700,fontSize:13,textTransform:"capitalize"}}>{fmtData(dia.data)} · {dia.horario}</div>
+                                <div style={{color:C.ouroPale,fontSize:11,marginTop:3,display:"flex",flexWrap:"wrap",gap:4,alignItems:"center"}}>
+                                  <span>{dia.igreja}</span>
+                                  {isDomingo(dia.data)&&<span style={badgeSt(C.ouro)}>☀️ Domingo</span>}
+                                  {dia.solenidade&&<span style={badgeSt("#f0c060")}>✨ {dia.nome_solenidade||"Solenidade"}</span>}
+                                  {ehBispo&&<span style={badgeSt("#e8a0ff")}>👑 Bispo</span>}
+                                  {ehIncenso&&<span style={badgeSt("#ff9966")}>🔥 Incenso</span>}
+                                </div>
+                              </div>
+                              <button onClick={()=>marcarTodosPresentesEscala(h,idx)} title="Marcar PRESENÇA para quem está sem registro" style={{background:STATUS.presenca.bg,color:STATUS.presenca.fg,border:"none",borderRadius:5,padding:"4px 9px",cursor:"pointer",fontSize:10,fontWeight:700,fontFamily:"inherit"}}>✓ todos presentes</button>
+                            </div>
+
+                            {escalados.map(([nome,fn])=>{
+                              const st=(dia.status||{})[nome];
+                              const orig=(dia.substituicoes||{})[nome];
+                              const chave=`${h.id}|${idx}|${nome}`;
+                              const temF=m=>(m.funcoes||[]).some(f=>norm(f)===norm(fn));
+                              return(
+                                <div key={nome} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",padding:"7px 0",borderTop:`1px solid ${C.ouro}18`}}>
+                                  <div style={{flex:"1 1 180px",minWidth:160}}>
+                                    <div style={{fontSize:9,color:C.ouro,letterSpacing:1,textTransform:"uppercase"}}>{fn}</div>
+                                    <div style={{fontSize:12,color:C.branco,fontWeight:600}}>{nome}</div>
+                                    {orig&&<div style={{fontSize:10,color:"#88ddff"}}>↔ no lugar de {orig.split(" ").slice(0,2).join(" ")}</div>}
+                                  </div>
+                                  <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                                    <BotoesStatus valor={st} onChange={v=>definirStatusEscala(h,idx,nome,v)}/>
+                                    {trocandoKey===chave?(
+                                      <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                                        <select autoFocus value="" onChange={e=>{if(e.target.value){trocarEscalado(h,idx,nome,e.target.value);setTrocandoKey(null);}}} style={{...inp,width:"auto",maxWidth:230,fontSize:11,padding:"4px 6px"}}>
+                                          <option value="">Trocar por…</option>
+                                          {membros.filter(m=>!nomesNoDia.has(m.nome)).sort((a,b)=>{
+                                            const ta=temF(a)?0:1,tb=temF(b)?0:1;
+                                            return ta!==tb?ta-tb:a.nome.localeCompare(b.nome);
+                                          }).map(m=><option key={m.id} value={m.nome}>{m.nome}{temF(m)?"":" (sem esta função)"}</option>)}
+                                        </select>
+                                        <button onClick={()=>setTrocandoKey(null)} style={{background:"none",border:"none",color:C.ouroPale,cursor:"pointer",fontSize:14}}>✕</button>
+                                      </div>
+                                    ):(
+                                      <button onClick={()=>setTrocandoKey(chave)} style={{background:"rgba(0,0,0,0.3)",border:`1px solid ${C.ouro}50`,color:C.ouroPale,borderRadius:5,padding:"3px 8px",fontSize:10,cursor:"pointer",fontFamily:"inherit"}}>↔ Trocar</button>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {(h.pendentes||[]).length>0&&<div style={{fontSize:11,color:"#88ddff"}}>🔖 Pendentes: {h.pendentes.slice(0,5).map(p=>(p.nome||p).split(" ")[0]).join(", ")}{h.pendentes.length>5?` +${h.pendentes.length-5}`:""}</div>}
+                </Card>
+              );
+            })}
           </div>
         )}
 
@@ -1282,3 +1461,4 @@ const lbl={display:"block",fontSize:10,color:C.ouro,letterSpacing:1,marginBottom
 const inp={background:"rgba(0,0,0,0.3)",border:`1px solid ${C.ouro}50`,borderRadius:7,padding:"8px 10px",color:C.brancoOff,fontSize:13,fontFamily:"Georgia,serif",outline:"none",width:"100%",boxSizing:"border-box"};
 const btnPri={background:`linear-gradient(135deg,${C.ouro},#A07828)`,border:"none",color:C.vermelho,borderRadius:7,padding:"9px 18px",cursor:"pointer",fontSize:13,fontFamily:"Georgia,serif",letterSpacing:.5,fontWeight:700};
 const btnSec={background:"rgba(0,0,0,0.25)",border:`1px solid ${C.ouro}50`,color:C.ouroPale,borderRadius:7,padding:"9px 18px",cursor:"pointer",fontSize:13,fontFamily:"Georgia,serif"};
+const badgeSt=cor=>({fontSize:10,color:cor,background:`${cor}25`,borderRadius:3,padding:"1px 5px"});
